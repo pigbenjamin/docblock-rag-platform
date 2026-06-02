@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docblock-core"
+version = "0.1.0"
+description = "Shared core library for docblock-rag-platform services"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg2-binary>=2.9.9",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.1",
+    "pillow>=10.0.0",
+    "transformers>=4.41.0",
+    "torch>=2.1.0",
+    "tqdm>=4.66.0",
+    "uuid7",
+    "FlagEmbedding",
+    "urllib3",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["docblock_core*"]

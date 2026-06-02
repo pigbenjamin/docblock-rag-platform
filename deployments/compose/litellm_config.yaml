@@ -1,0 +1,14 @@
+model_list:
+  - model_name: marker/pdf-to-md
+    litellm_params:
+      model: openai/marker-pdf-to-md
+      api_base: http://marker-service:8766/v1
+      api_key: "none"
+
+litellm_settings:
+  # Marker conversion can take up to 30 min; set proxy timeout slightly above
+  request_timeout: 1860
+  drop_params: true
+
+general_settings:
+  master_key: "sk-litellm-internal"

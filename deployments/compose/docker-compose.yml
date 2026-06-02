@@ -1,0 +1,174 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+# docblock-rag-platform  —  local dev compose
+# ─────────────────────────────────────────────
+
+x-build-base: &build-base
+  context: ../..
+  dockerfile: services/${SERVICE}/Dockerfile
+
+services:
+
+  # ── PostgreSQL ────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ai-x}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-acl_FIRDI}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PORT:-5437}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ai-x}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Webhook Service (Keycloak user sync) ──
+  webhook-service:
+    build:
+      context: ../..
+      dockerfile: services/webhook-service/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8763:8763"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Retrieve API (REST + MCP) ─────────────
+  retrieve-api:
+    build:
+      context: ../..
+      dockerfile: services/retrieve-api/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8761:8761"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Marker Service (PDF → Markdown, GPU) ──
+  marker-service:
+    build:
+      context: ../..
+      dockerfile: services/marker-service/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # marker/surya model cache — mount from host to avoid re-downloading 3GB
+      MODEL_CACHE_DIR: /datalab_cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8766:8766"
+    volumes:
+      - ingest_data:/data
+      - ${HOME}/.cache/datalab/models:/datalab_cache:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ── LiteLLM Proxy ─────────────────────────
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-latest
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      - marker-service
+
+  # ── Ingest Worker ─────────────────────────
+  ingest-worker:
+    build:
+      context: ../..
+      dockerfile: services/ingest-worker/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LITELLM_PROXY_URL: http://litellm-proxy:4000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8762:8762"
+    volumes:
+      - ingest_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm-proxy:
+        condition: service_started
+
+  # ── Admin API ─────────────────────────────
+  admin-api:
+    build:
+      context: ../..
+      dockerfile: services/admin-api/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8765:8765"
+    volumes:
+      - ingest_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingest-worker:
+        condition: service_started
+
+  # ── Nostr Proxy (embedding / rerank / chat via Nostr) ─────────
+  nostr-proxy:
+    build:
+      context: ../..
+      dockerfile: services/nostr-proxy/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8800:8800"
+    depends_on:
+      - litellm-proxy
+
+  # ── Nostr Consumer (relay subscriber → LiteLLM) ───────────────
+  nostr-consumer:
+    build:
+      context: ../..
+      dockerfile: services/nostr-consumer/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # litellm-proxy 只有 marker 模型，consumer 需要打外部 LiteLLM（embedding/rerank/chat）
+      LITELLM_BASE_URL: http://10.90.20.55:30400
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - nostr_consumer_data:/app/data
+    stop_grace_period: 15s
+    depends_on:
+      - nostr-proxy
+      - litellm-proxy
+
+volumes:
+  postgres_data:
+  ingest_data:
+  nostr_consumer_data:

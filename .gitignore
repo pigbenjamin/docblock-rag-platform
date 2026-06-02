@@ -1,0 +1,36 @@
+# Environment files (may contain secrets)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/
+*.log
+
+# Test / pytest cache
+.pytest_cache/
+.coverage
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker build artifacts
+*.tar
+
+# Data / uploads (large files, not for VCS)
+data/
+/services/nostr-consumer/data/

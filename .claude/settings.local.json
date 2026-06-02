@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /home/ai-x/km/repo/docblock-rag -type d | sort)",
+      "Read(//home/ai-x/km/repo/docblock-rag/**)"
+    ]
+  }
+}

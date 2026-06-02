@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Docs & tests (not needed in any image)
+docs/
+tests/
+
+# Python cache
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/*.egg-info
+
+# Virtual envs
+.venv
+venv
+env
+
+# Editor / OS
+.idea
+.vscode
+*.DS_Store
+
+# Compose / deploy config (not needed in images)
+deployments/compose/.env
+deployments/compose/*.env*
+
+# Temp files
+*.tmp
+*.log
