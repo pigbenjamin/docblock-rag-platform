@@ -47,7 +47,7 @@ def create_app() -> FastAPI:
 
         try:
             r = requests.get(
-                f"{settings.models.ollama_base_url.rstrip('/')}/api/tags",
+                f"{settings.models.litellm_base_url.rstrip('/')}/health",
                 timeout=3,
             )
             r.raise_for_status()

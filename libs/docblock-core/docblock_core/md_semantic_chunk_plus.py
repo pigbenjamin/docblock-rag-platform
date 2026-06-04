@@ -24,16 +24,18 @@ import requests
 # ============================================================
 
 def ollama_generate(model: str, prompt: str,
-                    url="http://localhost:11434/api/generate",
+                    url="http://localhost:4000",
                     temperature=0.0, timeout=600) -> str:
-    r = requests.post(url, json={
+    """Call LLM via OpenAI /v1/chat/completions (routes through nostr-proxy in k8s)."""
+    endpoint = url.rstrip("/") + "/v1/chat/completions"
+    r = requests.post(endpoint, json={
         "model": model,
-        "prompt": prompt,
+        "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        "options": {"temperature": temperature},
+        "temperature": temperature,
     }, timeout=timeout)
     r.raise_for_status()
-    return r.json().get("response", "")
+    return r.json()["choices"][0]["message"]["content"]
 
 def safe_json_load(s: str):
     """
@@ -612,15 +614,19 @@ def fallback_segment(text: str, target_tokens: int, hard_min_chars: int) -> List
 
 def segment_with_ollama(text: str, model: str, url: str, target_tokens: int, hard_min_chars: int, timeout: int = 300) -> List[Dict]:
     sys_prompt = "You return STRICT JSON only. No code fences, no extra text."
-    prompt = sys_prompt + "\n\n" + build_segment_prompt(text, target_tokens, hard_min_chars)
-    resp = requests.post(url, json={
+    prompt = build_segment_prompt(text, target_tokens, hard_min_chars)
+    endpoint = url.rstrip("/") + "/v1/chat/completions"
+    resp = requests.post(endpoint, json={
         "model": model,
-        "prompt": prompt,
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": prompt},
+        ],
         "stream": False,
-        "options": {"temperature": 0.0}
+        "temperature": 0.0,
     }, timeout=timeout)
     resp.raise_for_status()
-    raw = resp.json().get("response", "")
+    raw = resp.json()["choices"][0]["message"]["content"]
     data = safe_json_load(raw)
     spans = data.get("spans", [])
     return spans
@@ -685,14 +691,15 @@ def summarize_table_with_ollama(table_md: str, model: str, url: str, timeout: in
         "表格如下：\n" + table_md
     )
     try:
-        resp = requests.post(url, json={
+        endpoint = url.rstrip("/") + "/v1/chat/completions"
+        resp = requests.post(endpoint, json={
             "model": model,
-            "prompt": prompt,
+            "messages": [{"role": "user", "content": prompt}],
             "stream": False,
-            "options": {"temperature": 0.0}
+            "temperature": 0.0,
         }, timeout=timeout)
         resp.raise_for_status()
-        raw = resp.json().get("response","")
+        raw = resp.json()["choices"][0]["message"]["content"]
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("non-dict")
@@ -848,7 +855,7 @@ def parser():
     ap.add_argument("md", help="Path to Marker-produced Markdown")
     ap.add_argument("--out", default="chunks.json", help="Output JSON path")
     ap.add_argument("--model", default="gpt-oss:20b", help="Ollama model for segmentation")
-    ap.add_argument("--ollama-url", default="http://localhost:11434/api/generate", help="Ollama /api/generate endpoint")
+    ap.add_argument("--ollama-url", default="http://localhost:4000", help="LiteLLM base URL (used for /v1/chat/completions)")
     ap.add_argument("--target-tokens", type=int, default=480, help="Target tokens per chunk")
     ap.add_argument("--hard-min-chars", type=int, default=300, help="Minimum chars for the tail chunk before merging")
     ap.add_argument("--window-chars", type=int, default=15000, help="Sliding window size in characters")
@@ -878,7 +885,7 @@ def md_semantic_chunker(md_path: str, output_path: str, **kwargs):
         "out": output_path,
 
         "model": "gpt-oss:20b",
-        "ollama_url": "http://localhost:11434/api/generate",
+        "ollama_url": "http://localhost:4000",
         "target_tokens": 480,
         "hard_min_chars": 300,
         "window_chars": 15000,

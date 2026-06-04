@@ -58,7 +58,7 @@ class RagClient:
         litellm_base_url: Optional[str] = None,
         embed_model: Optional[str] = None,
         chat_model: Optional[str] = None,
-        chat_timeout: int = 180,
+        chat_timeout: int = 300,
     ) -> None:
         self.search_client = DocblockSearchClient(
             pg_dsn=pg_dsn or settings.db.pg_dsn,
@@ -66,7 +66,7 @@ class RagClient:
             embed_model=embed_model or settings.models.embed_model,
         )
         self.litellm_base_url = (litellm_base_url or settings.models.litellm_base_url).rstrip("/")
-        self.chat_model = chat_model or getattr(settings.models, "chat_model", None) or "qwen3:8b"
+        self.chat_model = chat_model or settings.models.chat_model
         self.chat_timeout = chat_timeout
 
     def generate(
@@ -80,7 +80,7 @@ class RagClient:
         enable_table_lex: bool = True,
         max_chars_per_hit: int = 1800,
         routing: bool = True,
-        router_model: str = "qwen2:7b",
+        router_model: str = "qwen3.5-9b",
     ) -> RagAnswer:
         # 1) Retrieve
         hits = self.search_client.search(

@@ -1,0 +1,97 @@
+# PV/PVC for PostgreSQL data
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: docblock-postgres-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /home/ai-x/data/docblock/postgres
+    type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: docblock-postgres-pvc
+  namespace: docblock
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: ""
+  volumeName: docblock-postgres-pv
+
+---
+# PV/PVC for ingest_data — shared by admin-api, ingest-worker, marker-service
+# hostPath supports ReadWriteMany on single-node k3s
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: docblock-ingest-pv
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /home/ai-x/data/docblock/ingest
+    type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: docblock-ingest-pvc
+  namespace: docblock
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: ""
+  volumeName: docblock-ingest-pv
+
+---
+# PV/PVC for nostr-consumer audit.db
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: docblock-consumer-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /home/ai-x/data/docblock/consumer
+    type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: docblock-consumer-pvc
+  namespace: docblock
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ""
+  volumeName: docblock-consumer-pv

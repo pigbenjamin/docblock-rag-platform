@@ -134,9 +134,14 @@ def _to_oai_embedding(result: dict) -> dict:
 async def embeddings(request: Request):
     body = await request.json()
     if EMBED_VIA_NOSTR:
-        content = json.dumps(body, ensure_ascii=False)
-        result = await asyncio.to_thread(_nostr_request_sync, content, 2000)
-        return JSONResponse(_to_oai_embedding(result))
+        try:
+            content = json.dumps(body, ensure_ascii=False)
+            result = await asyncio.to_thread(_nostr_request_sync, content, 2000)
+            return JSONResponse(_to_oai_embedding(result))
+        except TimeoutError as e:
+            return JSONResponse({"error": {"message": str(e), "type": "timeout"}}, status_code=503)
+        except Exception as e:
+            return JSONResponse({"error": {"message": str(e), "type": "proxy_error"}}, status_code=500)
     else:
         def _call():
             return req_lib.post(
@@ -150,9 +155,14 @@ async def embeddings(request: Request):
 async def rerank(request: Request):
     body = await request.json()
     if RERANK_VIA_NOSTR:
-        content = json.dumps(body, ensure_ascii=False)
-        result = await asyncio.to_thread(_nostr_request_sync, content, 2001)
-        return JSONResponse(result)
+        try:
+            content = json.dumps(body, ensure_ascii=False)
+            result = await asyncio.to_thread(_nostr_request_sync, content, 2001)
+            return JSONResponse(result)
+        except TimeoutError as e:
+            return JSONResponse({"error": {"message": str(e), "type": "timeout"}}, status_code=503)
+        except Exception as e:
+            return JSONResponse({"error": {"message": str(e), "type": "proxy_error"}}, status_code=500)
     else:
         def _call():
             return req_lib.post(
@@ -166,13 +176,18 @@ async def rerank(request: Request):
 async def chat_completions(request: Request):
     body = await request.json()
     if CHAT_VIA_NOSTR:
-        content = json.dumps(body, ensure_ascii=False)
-        result = await asyncio.to_thread(_nostr_request_sync, content, 2002, timeout=180)
-        return JSONResponse(result)
+        try:
+            content = json.dumps(body, ensure_ascii=False)
+            result = await asyncio.to_thread(_nostr_request_sync, content, 2002, timeout=300)
+            return JSONResponse(result)
+        except TimeoutError as e:
+            return JSONResponse({"error": {"message": str(e), "type": "timeout"}}, status_code=503)
+        except Exception as e:
+            return JSONResponse({"error": {"message": str(e), "type": "proxy_error"}}, status_code=500)
     else:
         def _call():
             return req_lib.post(
-                f"{OLLAMA_DIRECT_URL}/v1/chat/completions", json=body, timeout=180
+                f"{OLLAMA_DIRECT_URL}/v1/chat/completions", json=body, timeout=300
             )
         r = await asyncio.to_thread(_call)
         return JSONResponse(r.json(), status_code=r.status_code)

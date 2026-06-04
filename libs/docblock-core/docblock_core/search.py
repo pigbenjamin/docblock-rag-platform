@@ -560,7 +560,7 @@ class DocblockSearchClient:
     # ---------------------------
     # Routing
     # ---------------------------
-    def route_profile(self, query: str, *, router_model: str = "qwen2:7b", timeout: int = 30) -> str:
+    def route_profile(self, query: str, *, router_model: str = "qwen3.5-9b", timeout: int = 30) -> str:
         url = f"{self.litellm_base_url.rstrip('/')}/v1/chat/completions"
         payload = {
             "model": router_model,
@@ -1350,7 +1350,7 @@ class DocblockSearchClient:
         top_k: int = 20,
         top_k_per_doc: int = 20,
         routing: bool = True,
-        router_model: str = "qwen2:7b",
+        router_model: str = "qwen3.5-9b",
         enable_table_lex: bool = True,
         weights: Optional[Dict[str, float]] = None,
     ) -> List[SearchHit]:

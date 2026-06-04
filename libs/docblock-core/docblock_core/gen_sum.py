@@ -112,65 +112,56 @@ def split_md_into_sections(md: str) -> List[MdSection]:
 # -----------------------------
 
 def call_llm(system: str, user: str) -> str:
-    """
-    Replace with your local LLM call (Ollama, etc.)
-    Must return plain text.
-    """
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip()
-    gen_url = os.getenv("OLLAMA_GEN_URL", "").strip()
-    model = os.getenv("LLM_MODEL", "").strip() or os.getenv("SUMMARY_MODEL", "").strip() or "qwen3:8b"
+    """Call LLM via OpenAI /v1/chat/completions (routes through nostr-proxy in k8s)."""
+    base_url = os.getenv("LITELLM_BASE_URL", "http://localhost:4000").strip()
+    model = os.getenv("LLM_MODEL", "").strip() or os.getenv("SUMMARY_MODEL", "").strip() or "qwen3.5-9b"
     timeout = int(os.getenv("OLLAMA_TIMEOUT", "180"))
 
-    if not gen_url:
-        gen_url = base_url.rstrip("/") + "/api/generate"
+    endpoint = base_url.rstrip("/") + "/v1/chat/completions"
+    messages: List[Dict[str, Any]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
 
     payload: Dict[str, Any] = {
         "model": model,
-        "prompt": user,
+        "messages": messages,
         "stream": False,
-        "options": {"temperature": 0.2},
+        "temperature": 0.2,
     }
-    if system:
-        payload["system"] = system
 
     try:
-        r = requests.post(gen_url, json=payload, timeout=timeout)
+        r = requests.post(endpoint, json=payload, timeout=timeout)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
         raise RuntimeError(f"LLM request failed: {e}")
 
-    out = data.get("response")
+    out = data["choices"][0]["message"]["content"]
     if not isinstance(out, str):
         raise ValueError(f"Unexpected LLM response: {data}")
     return out.strip()
 
 def call_embed(text: str) -> List[float]:
-    """
-    Replace with your embedding endpoint.
-    Return embedding vector list[float].
-    """
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip()
-    embed_url = os.getenv("OLLAMA_EMBED_URL", "").strip()
-    model = os.getenv("EMBED_MODEL", "").strip() or os.getenv("EMBEDDING_MODEL", "").strip() or "bge-m3"
+    """Call embedding via OpenAI /v1/embeddings (routes through nostr-proxy in k8s)."""
+    base_url = os.getenv("LITELLM_BASE_URL", "http://localhost:4000").strip()
+    model = os.getenv("EMBED_MODEL", "").strip() or "qwen3-embedding"
     timeout = int(os.getenv("EMBED_TIMEOUT", os.getenv("OLLAMA_TIMEOUT", "120")))
 
-    if not embed_url:
-        embed_url = base_url.rstrip("/") + "/api/embeddings"
-
+    endpoint = base_url.rstrip("/") + "/v1/embeddings"
     payload: Dict[str, Any] = {
         "model": model,
-        "prompt": text,
+        "input": text,
     }
 
     try:
-        r = requests.post(embed_url, json=payload, timeout=timeout)
+        r = requests.post(endpoint, json=payload, timeout=timeout)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
         raise RuntimeError(f"Embedding request failed: {e}")
 
-    emb = data.get("embedding")
+    emb = data["data"][0]["embedding"]
     if not isinstance(emb, list):
         raise ValueError(f"Unexpected embedding response: {data}")
     return emb

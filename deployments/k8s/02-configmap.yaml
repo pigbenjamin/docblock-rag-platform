@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: docblock-config
+  namespace: docblock
+data:
+  # Tenant
+  TENANT_ID: "firdi"
+
+  # DB (non-secret part)
+  DOCBLOCK_TENANT_ID: "firdi"
+
+  # LLM routing (retrieve-api → nostr-proxy → Nostr → LiteLLM)
+  LITELLM_BASE_URL:  "http://nostr-proxy:8800"
+  OLLAMA_BASE_URL:   "http://nostr-proxy:8800"
+  OLLAMA_DIRECT_URL: "http://10.90.20.55:11434"
+
+  # Nostr
+  RELAY_URL: "wss://10.90.20.55:9443/"
+  EMBED_VIA_NOSTR:  "true"
+  RERANK_VIA_NOSTR: "true"
+  CHAT_VIA_NOSTR:   "true"
+
+  # Models
+  EMBED_MODEL:    "qwen3-embedding"
+  RERANK_MODEL:   "qwen3-reranker"
+  SEG_MODEL:      "qwen3.5-9b"
+  SUMMARY_MODEL:  "qwen3.5-9b"
+  CHAT_MODEL:     "qwen3.5-9b"
+
+  # Internal service URLs
+  INGEST_WORKER_URL:    "http://ingest-worker:8762"
+  MARKER_SERVICE_URL:   "http://marker-service:8766"
+  LITELLM_PROXY_URL:    "http://litellm-proxy:4000"
+
+  # Keycloak (使用 host IP，pod 內無法用 localhost)
+  KEYCLOAK_URL:       "http://10.90.20.55:8088"
+  KEYCLOAK_REALM:     "firdi"
+  KEYCLOAK_CLIENT_ID: "docblock"
+
+  # Python / HuggingFace
+  PYTHONUNBUFFERED:     "1"
+  HF_HUB_OFFLINE:      "1"
+  TRANSFORMERS_OFFLINE: "1"
+
+  # Marker
+  MODEL_CACHE_DIR: "/datalab_cache"

@@ -29,17 +29,20 @@ class ChunkingSettings:
 
     infer_table_capabilities: bool = _env_bool("INFER_TABLE_CAPABILITIES", True)
     summarize_tables: bool = _env_bool("SUMMARIZE_TABLES", False)
-    capabilities_model: Optional[str] = os.getenv("CAPABILITIES_MODEL", "qwen3:8b")  
+    capabilities_model: Optional[str] = os.getenv("CAPABILITIES_MODEL", "qwen3.5-9b")
 
 
 @dataclass
 class ModelSettings:
     # segmentation / structure extraction
-    seg_model: str = os.getenv("SEG_MODEL", "qwen3:8b")
+    seg_model: str = os.getenv("SEG_MODEL", "qwen3.5-9b")
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     litellm_base_url: str = os.getenv("LITELLM_BASE_URL", "http://localhost:4000")
-    embed_model: str = os.getenv("EMBED_MODEL", "qwen3-embedding-8b")
-    summary_model: str = os.getenv("SUMMARY_MODEL", "qwen3.5:9b")
+    # alias: legacy code reads ollama_gen_url; routes through litellm (→ nostr-proxy in k8s)
+    ollama_gen_url: str = os.getenv("LITELLM_BASE_URL", "http://localhost:4000")
+    embed_model: str = os.getenv("EMBED_MODEL", "qwen3-embedding")
+    summary_model: str = os.getenv("SUMMARY_MODEL", "qwen3.5-9b")
+    chat_model: str = os.getenv("CHAT_MODEL", "qwen3.5-9b")
     
     # vision
     vision_device: str = os.getenv("VISION_DEVICE", "cuda")

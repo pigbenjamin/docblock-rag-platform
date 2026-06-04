@@ -1,0 +1,45 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-service
+  namespace: docblock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webhook-service
+  template:
+    metadata:
+      labels:
+        app: webhook-service
+    spec:
+      imagePullSecrets:
+        - name: pigbenjamin-ghcr-secret
+      containers:
+        - name: webhook-service
+          image: ghcr.io/pigbenjamin/docblock-rag-platform/webhook-service:latest
+          ports:
+            - containerPort: 8763
+          envFrom:
+            - configMapRef:
+                name: docblock-config
+            - secretRef:
+                name: docblock-db-secret
+            - secretRef:
+                name: docblock-app-secret
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-service
+  namespace: docblock
+spec:
+  type: NodePort
+  selector:
+    app: webhook-service
+  ports:
+    - port: 8763
+      targetPort: 8763
+      nodePort: 31763

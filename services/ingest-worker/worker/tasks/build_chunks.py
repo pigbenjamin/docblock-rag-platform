@@ -23,7 +23,7 @@ def run_build_chunks(
         tenant_id=tenant_id or settings.db.tenant_id,
         document_id=document_id,
         seg_model=settings.models.seg_model,
-        ollama_gen_url=settings.models.ollama_gen_url,
+        ollama_gen_url=settings.models.litellm_base_url,
         infer_table_capabilities=settings.chunking.infer_table_capabilities,
         summarize_tables=settings.chunking.summarize_tables,
         capabilities_model=settings.chunking.capabilities_model,

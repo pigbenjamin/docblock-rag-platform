@@ -50,7 +50,7 @@ class SearchRequest(BaseModel):
     top_k: int = 10
     top_k_per_doc: int = 20
     routing: bool = True
-    router_model: str = "qwen2:7b"
+    router_model: str = "qwen3.5-9b"
     enable_table_lex: bool = True
     preview_chars: int = 400
     max_docs: int = 5000
@@ -62,7 +62,7 @@ class SearchOpenRequest(BaseModel):
     top_k: int = 10
     top_k_per_doc: int = 20
     routing: bool = True
-    router_model: str = "qwen2:7b"
+    router_model: str = "qwen3.5-9b"
     enable_table_lex: bool = True
     preview_chars: int = 400
     max_docs: int = 5000

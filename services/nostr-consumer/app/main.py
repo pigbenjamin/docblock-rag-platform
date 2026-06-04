@@ -145,9 +145,10 @@ def _call_embedding(content: str, pubkey: str) -> str | None:
             embedding = r.json()["data"][0]["embedding"]
             return json.dumps({"embedding": embedding})
         print(f"❌ Embedding HTTP {r.status_code}: {r.text[:200]}")
+        return json.dumps({"error": f"LiteLLM HTTP {r.status_code}", "detail": r.text[:200]})
     except Exception as e:
         print(f"❌ Embedding 異常: {e}")
-    return None
+        return json.dumps({"error": str(e)})
 
 
 def _call_chat(content: str, pubkey: str) -> str | None:
@@ -163,14 +164,15 @@ def _call_chat(content: str, pubkey: str) -> str | None:
             f"{LITELLM_BASE_URL}/v1/chat/completions",
             headers=_litellm_headers(),
             json={"model": model, "messages": messages, "stream": False},
-            timeout=180,
+            timeout=300,
         )
         if r.status_code == 200:
             return r.text
         print(f"❌ Chat HTTP {r.status_code}: {r.text[:200]}")
+        return json.dumps({"error": {"message": f"LiteLLM HTTP {r.status_code}", "detail": r.text[:200]}})
     except Exception as e:
         print(f"❌ Chat 異常: {e}")
-    return None
+        return json.dumps({"error": {"message": str(e)}})
 
 
 def _call_rerank(content: str, pubkey: str) -> str | None:
@@ -192,9 +194,10 @@ def _call_rerank(content: str, pubkey: str) -> str | None:
         if r.status_code == 200:
             return r.text
         print(f"❌ Rerank HTTP {r.status_code}: {r.text[:200]}")
+        return json.dumps({"error": {"message": f"LiteLLM HTTP {r.status_code}", "detail": r.text[:200]}})
     except Exception as e:
         print(f"❌ Rerank 異常: {e}")
-    return None
+        return json.dumps({"error": {"message": str(e)}})
 
 # ------------------------------------------------------------------
 # Reply via Nostr

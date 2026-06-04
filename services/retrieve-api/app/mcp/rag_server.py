@@ -53,15 +53,12 @@ def _hit_to_dict(h: SearchHit, rank: int, preview_chars: int = 400) -> Dict[str,
 
 
 def _ollama_chat(messages: List[Dict[str, str]], *, model: str, timeout: int = 120) -> str:
-    """
-    Minimal non-streaming chat call to Ollama.
-    """
-    url = f"{settings.models.ollama_base_url.rstrip('/')}/api/chat"
+    url = f"{settings.models.litellm_base_url.rstrip('/')}/v1/chat/completions"
     payload = {"model": model, "messages": messages, "stream": False}
     r = requests.post(url, json=payload, timeout=timeout)
     r.raise_for_status()
     data = r.json()
-    return ((data.get("message") or {}).get("content") or "").strip()
+    return ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "").strip()
 
 
 # ---------------------------

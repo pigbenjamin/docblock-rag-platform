@@ -1,0 +1,52 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest-worker
+  namespace: docblock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingest-worker
+  template:
+    metadata:
+      labels:
+        app: ingest-worker
+    spec:
+      imagePullSecrets:
+        - name: pigbenjamin-ghcr-secret
+      containers:
+        - name: ingest-worker
+          image: ghcr.io/pigbenjamin/docblock-rag-platform/ingest-worker:latest
+          ports:
+            - containerPort: 8762
+          envFrom:
+            - configMapRef:
+                name: docblock-config
+            - secretRef:
+                name: docblock-db-secret
+            - secretRef:
+                name: docblock-app-secret
+          volumeMounts:
+            - name: ingest-data
+              mountPath: /data
+      volumes:
+        - name: ingest-data
+          persistentVolumeClaim:
+            claimName: docblock-ingest-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingest-worker
+  namespace: docblock
+spec:
+  type: NodePort
+  selector:
+    app: ingest-worker
+  ports:
+    - port: 8762
+      targetPort: 8762
+      nodePort: 31762
