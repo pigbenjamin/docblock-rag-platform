@@ -84,7 +84,7 @@ requests.post(
 r = requests.post(
     f"{RETRIEVE_API}/v1/search",
     json={"query": "policy", "user_id": USERS["u001"], "doc_ids": [DELETE_DOC_ID], "top_k": 3},
-    timeout=20,
+    timeout=SEARCH_TIMEOUT,
 )
 if r.status_code == 200:
     hits = r.json().get("hits", [])
@@ -114,7 +114,7 @@ info("確認搜尋結果不含已刪除文件")
 r = requests.post(
     f"{RETRIEVE_API}/v1/search/open",
     json={"query": "policy", "top_k": 20},
-    timeout=20,
+    timeout=SEARCH_TIMEOUT,
 )
 if r.status_code == 200:
     hits = r.json().get("hits", [])

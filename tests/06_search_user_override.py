@@ -28,7 +28,7 @@ def search_access(user_id):
     r = requests.post(
         f"{RETRIEVE_API}/v1/search",
         json={"query": QUERY, "user_id": user_id, "doc_ids": [TARGET_DOC], "top_k": 5},
-        timeout=20,
+        timeout=SEARCH_TIMEOUT,
     )
     if r.status_code != 200:
         return None, f"HTTP {r.status_code}"

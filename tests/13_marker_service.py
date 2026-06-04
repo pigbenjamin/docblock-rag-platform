@@ -26,15 +26,18 @@ header("13  Marker Service + LiteLLM Proxy")
 # 1. marker-service /healthz
 # ─────────────────────────────────────────────────────────────────
 info("─ 1. marker-service /healthz")
-try:
-    r = requests.get(f"{MARKER_SERVICE}/healthz", timeout=5)
-    body = r.json()
-    if r.status_code == 200 and body.get("status") == "ok":
-        ok(f"marker-service 存活  →  {body}")
-    else:
-        fail(f"marker-service /healthz → HTTP {r.status_code}  body={body}")
-except Exception as e:
-    fail(f"marker-service /healthz → {e}")
+if os.getenv("TEST_ENV", "").lower() == "k8s":
+    info("k8s 模式：marker-service 無 NodePort，跳過直連測試（改由 litellm-service 路由驗證）")
+else:
+    try:
+        r = requests.get(f"{MARKER_SERVICE}/healthz", timeout=5)
+        body = r.json()
+        if r.status_code == 200 and body.get("status") == "ok":
+            ok(f"marker-service 存活  →  {body}")
+        else:
+            fail(f"marker-service /healthz → HTTP {r.status_code}  body={body}")
+    except Exception as e:
+        fail(f"marker-service /healthz → {e}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -78,7 +81,9 @@ except Exception as e:
 # 4. marker-service POST /v1/convert（直接呼叫）
 # ─────────────────────────────────────────────────────────────────
 info("─ 4. marker-service POST /v1/convert（直接）")
-if SKIP_CONVERT:
+if os.getenv("TEST_ENV", "").lower() == "k8s":
+    info("k8s 模式：marker-service 無 NodePort，跳過直連測試")
+elif SKIP_CONVERT:
     info("SKIP_CONVERT=1，跳過實際轉換測試")
 else:
     convert_doc_id = f"ms-test-{uuid.uuid4().hex[:6]}"

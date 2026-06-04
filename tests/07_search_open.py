@@ -19,7 +19,7 @@ info("POST /v1/search/open（搜尋所有文件）")
 r = requests.post(
     f"{RETRIEVE_API}/v1/search/open",
     json={"query": "food regulation policy", "top_k": 10, "routing": True},
-    timeout=30,
+    timeout=SEARCH_TIMEOUT,
 )
 if r.status_code != 200:
     fail(f"open search → HTTP {r.status_code}  body={r.text[:200]}")
@@ -45,7 +45,7 @@ r = requests.post(
         "doc_ids": ["test-eurfood"],
         "top_k":   5,
     },
-    timeout=20,
+    timeout=SEARCH_TIMEOUT,
 )
 if r.status_code != 200:
     fail(f"open search (filtered) → HTTP {r.status_code}")
@@ -76,7 +76,7 @@ info("驗證 routing 資訊（routing=True 時應有 profile）")
 r = requests.post(
     f"{RETRIEVE_API}/v1/search/open",
     json={"query": "network policy", "doc_ids": list(EXISTING_DOCS.keys()), "top_k": 3, "routing": True},
-    timeout=30,
+    timeout=SEARCH_TIMEOUT,
 )
 if r.status_code == 200:
     routing = r.json().get("routing", {})

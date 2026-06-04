@@ -1,22 +1,40 @@
 """
 共用測試設定。
 所有測試腳本從此 import，只需改這一個地方即可切換環境。
+
+環境選擇：
+  本地 docker-compose：預設值（localhost）
+  k8s（10.90.20.55）：設定 TEST_ENV=k8s 或手動帶 env var
 """
 import os
 import sys
 
+_NODE = "10.90.20.55"
+_K8S  = os.getenv("TEST_ENV", "").lower() == "k8s"
+
+def _url(local_port: int, node_port: int) -> str:
+    if _K8S:
+        return f"http://{_NODE}:{node_port}"
+    return os.getenv(f"_UNUSED_{local_port}", f"http://localhost:{local_port}")
+
 # ── 服務 URL ─────────────────────────────────────────────────
-RETRIEVE_API    = os.getenv("RETRIEVE_API",    "http://localhost:8761")
-ADMIN_API       = os.getenv("ADMIN_API",       "http://localhost:8765")
-INGEST_WORKER   = os.getenv("INGEST_WORKER",   "http://localhost:8762")
-WEBHOOK_SERVICE = os.getenv("WEBHOOK_SERVICE", "http://localhost:8763")
-MARKER_SERVICE  = os.getenv("MARKER_SERVICE",  "http://localhost:8766")
-LITELLM_PROXY   = os.getenv("LITELLM_PROXY",   "http://localhost:4000")
-NOSTR_PROXY     = os.getenv("NOSTR_PROXY",     "http://localhost:8800")
+RETRIEVE_API    = os.getenv("RETRIEVE_API",    f"http://{_NODE}:31761" if _K8S else "http://localhost:8761")
+ADMIN_API       = os.getenv("ADMIN_API",       f"http://{_NODE}:31765" if _K8S else "http://localhost:8765")
+INGEST_WORKER   = os.getenv("INGEST_WORKER",   f"http://{_NODE}:31762" if _K8S else "http://localhost:8762")
+WEBHOOK_SERVICE = os.getenv("WEBHOOK_SERVICE", f"http://{_NODE}:31763" if _K8S else "http://localhost:8763")
+MARKER_SERVICE  = os.getenv("MARKER_SERVICE",  f"http://{_NODE}:30400" if _K8S else "http://localhost:8766")  # k8s: no NodePort, access via LITELLM_PROXY
+LITELLM_PROXY   = os.getenv("LITELLM_PROXY",   f"http://{_NODE}:30400")
+NOSTR_PROXY     = os.getenv("NOSTR_PROXY",     f"http://{_NODE}:31800" if _K8S else "http://localhost:8800")
 
 # ── 密鑰 ─────────────────────────────────────────────────────
-ACL_ADMIN_SECRET = os.getenv("ACL_ADMIN_SECRET", "dev-secret-change-me")
+ACL_ADMIN_SECRET = os.getenv("ACL_ADMIN_SECRET", "acl-admin-secret-changeme" if _K8S else "dev-secret-change-me")
 WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET",   "dev-webhook-secret")
+
+# ── Timeout（k8s 走 Nostr 路徑比直連慢，需要更長 timeout）──────
+TIMEOUT_SCALE  = 1                   # 統一倍數（nostr 路徑兩邊一樣慢）
+SEARCH_TIMEOUT = 120                 # 搜尋（含 embed + routing，nostr 路徑需要）
+ACL_TIMEOUT    = 120                 # ACL 搜尋驗證
+RAG_TIMEOUT    = 300                 # RAG 問答生成
 
 # ── 租戶 ─────────────────────────────────────────────────────
 TENANT_ID = "firdi"

@@ -45,7 +45,7 @@ for user_key, label, expected_access, expect_hits in test_cases:
             "doc_ids": [TARGET_DOC],
             "top_k":   5,
         },
-        timeout=20,
+        timeout=SEARCH_TIMEOUT,
     )
     if r.status_code != 200:
         fail(f"{user_key}({label}) → HTTP {r.status_code}")

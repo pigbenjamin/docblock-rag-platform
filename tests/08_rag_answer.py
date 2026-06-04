@@ -30,7 +30,7 @@ r = requests.post(
         "user_id":  USER_WITH_ACCESS,
         "top_k":    5,
     },
-    timeout=120,   # RAG 需要 LLM 生成，等待較長
+    timeout=RAG_TIMEOUT,   # RAG 需要 LLM 生成，等待較長
 )
 
 if r.status_code != 200:
@@ -68,7 +68,7 @@ r = requests.post(
         "user_id":  USER_NO_ACCESS,
         "top_k":    5,
     },
-    timeout=30,
+    timeout=SEARCH_TIMEOUT,
 )
 
 if r.status_code in (403, 404):
@@ -98,7 +98,7 @@ r = requests.post(
         "user_id":  USER_WITH_ACCESS,
         "top_k":    5,
     },
-    timeout=120,
+    timeout=RAG_TIMEOUT,
 )
 
 if r.status_code == 200:

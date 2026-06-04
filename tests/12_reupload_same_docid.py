@@ -125,7 +125,7 @@ def open_search_hits(doc_id_filter):
     r = requests.post(
         f"{RETRIEVE_API}/v1/search/open",
         json={"query": "policy network document", "doc_ids": [doc_id_filter], "top_k": 100},
-        timeout=20,
+        timeout=SEARCH_TIMEOUT,
     )
     if r.status_code != 200:
         return None

@@ -26,7 +26,7 @@ r = requests.post(
     f"{ADMIN_API}/v1/acl/write-map",
     headers=ACL_HEADERS,
     json={"document_id": DOC_UUID, "access_rules": rules},
-    timeout=10,
+    timeout=ACL_TIMEOUT,
 )
 if r.status_code != 200:
     fail(f"write-map → HTTP {r.status_code}  body={r.text[:200]}")
@@ -50,7 +50,7 @@ for user_id, label, expected_access in cases:
     r = requests.post(
         f"{RETRIEVE_API}/v1/search",
         json={"query": "IT OT 網路", "user_id": user_id, "doc_ids": [DOC_ID], "top_k": 5},
-        timeout=15,
+        timeout=ACL_TIMEOUT,
     )
     if r.status_code != 200:
         fail(f"search({label}) → HTTP {r.status_code}")
@@ -74,7 +74,7 @@ r = requests.post(
     f"{ADMIN_API}/v1/acl/delete-map",
     headers=ACL_HEADERS,
     json={"document_id": DOC_UUID, "principals": principals_to_delete},
-    timeout=10,
+    timeout=ACL_TIMEOUT,
 )
 if r.status_code != 200:
     fail(f"delete-map → HTTP {r.status_code}  body={r.text[:200]}")
@@ -90,7 +90,7 @@ info("搜尋驗證 delete-map 效果（dept-B 用戶應變 deny）")
 r = requests.post(
     f"{RETRIEVE_API}/v1/search",
     json={"query": "IT OT 網路", "user_id": USERS["u003"], "doc_ids": [DOC_ID], "top_k": 5},
-    timeout=15,
+    timeout=ACL_TIMEOUT,
 )
 if r.status_code == 200:
     access = r.json().get("access", {}).get(DOC_ID, "deny")
@@ -112,7 +112,7 @@ r = requests.post(
             {"principal_type": "department", "principal_id": "dept-A", "effect": "detail"},
         ],
     },
-    timeout=10,
+    timeout=ACL_TIMEOUT,
 )
 if r.status_code == 200 and r.json().get("ok"):
     ok("ACL 已還原為 dept-A=detail")
