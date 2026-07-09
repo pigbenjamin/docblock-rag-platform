@@ -6,8 +6,14 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 import psycopg2
-from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
+from app.auth import (
+    get_current_user_id,
+    get_current_user_id_or_admin_secret,
+    require_department_km,
+    require_document_km,
+)
 from app.config import settings
 from docblock_core.storage import LocalFileStorage
 
@@ -36,7 +42,7 @@ async def upload_document(
     document_id: Optional[str] = Form(None),
     title: str = Form(""),
     departments: List[str] = Form(...),
-    x_user_id: str = Header(..., alias="X-User-Id"),
+    user_id: str = Depends(get_current_user_id),
 ) -> Dict[str, Any]:
     """
     Upload a PDF, save it to shared storage, then trigger the full ingest pipeline
@@ -47,20 +53,21 @@ async def upload_document(
       unchanged content keeps the current version; changed content bumps it.
     - `departments`: at least one department this document belongs to. Each
       listed department, plus the uploader, is automatically granted `detail`
-      access; no other access_rules can be set at upload time - use the ACL
-      endpoints afterwards for anything more specific.
-    - `X-User-Id`: uploader identity. Plain header for now (no JWT auth until
-      phase 4); will become the verified JWT `sub` claim then.
+      (management) access; no other access_rules can be set at upload time -
+      use the ACL endpoints afterwards for anything more specific. The caller
+      must hold the KM role in at least one listed department.
+    - Caller identity: `Authorization: Bearer <keycloak access token>`
+      (preferred, verified via JWKS) or the legacy `X-User-Id` header while
+      the frontend/tests migrate.
     """
     if document_id is not None and not _is_uuid(document_id):
         raise HTTPException(status_code=400, detail="document_id must be a UUID")
 
-    if not _is_uuid(x_user_id):
-        raise HTTPException(status_code=400, detail="X-User-Id must be a UUID")
-
     departments = [d.strip() for d in departments if d.strip()]
     if not departments:
         raise HTTPException(status_code=400, detail="at least one department is required")
+
+    require_department_km(user_id, departments, mode="any")
 
     resolved_document_id = document_id or str(uuid.uuid4())
 
@@ -71,7 +78,7 @@ async def upload_document(
     pdf_path = storage.save_temp(job_id, safe_filename, content)
 
     access_rules: Dict[str, str] = {f"department:{dept}": "detail" for dept in departments}
-    access_rules[f"user:{x_user_id}"] = "detail"
+    access_rules[f"user:{user_id}"] = "detail"
 
     payload = {
         "job_id": job_id,
@@ -83,7 +90,7 @@ async def upload_document(
         "original_filename": safe_filename,
         "file_size": len(content),
         "mime_type": file.content_type,
-        "created_by": x_user_id,
+        "created_by": user_id,
         "access_rules": access_rules,
     }
 
@@ -163,13 +170,22 @@ def get_document(document_id: str) -> Dict[str, Any]:
 
 
 @router.delete("/{document_id}")
-def delete_document(document_id: str) -> Dict[str, Any]:
+def delete_document(
+    document_id: str,
+    user_id: Optional[str] = Depends(get_current_user_id_or_admin_secret),
+) -> Dict[str, Any]:
     """
     Delete a document and all its chunks/ACL from PostgreSQL.
     Cascades via FK constraints.
+
+    Requires KM role in one of the document's owning departments (or the
+    legacy `X-Acl-Secret` admin bypass).
     """
     if not _is_uuid(document_id):
         raise HTTPException(status_code=400, detail="document_id must be a UUID")
+
+    if user_id is not None:
+        require_document_km(user_id, document_id)
 
     with _db_conn() as conn:
         with conn.cursor() as cur:

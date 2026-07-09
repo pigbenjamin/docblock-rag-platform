@@ -15,6 +15,37 @@ from docblock_core import sql_utils
 Principal = Tuple[str, str]  # (principal_type, principal_id)
 AccessLevel = Literal["detail", "summary", "deny"]
 
+# document_acl only supports 'user'/'department' principals; 'role' is a
+# user-attribute (used in user_principal for KM-role checks) and must never
+# be written directly onto a document's ACL.
+DOC_ACL_PRINCIPAL_TYPES = ("user", "department")
+
+
+def parse_principal_key(key: str) -> Principal:
+    """Parse a 'type:id' principal key for document ACL operations.
+
+    Only 'user' and 'department' are accepted here; unlike the permissive
+    parsing used internally by ACLService.write_access (which defaults to
+    "user" when no separator is present), this raises on anything else so
+    callers get an explicit error instead of a silently-wrong principal.
+    """
+    if ":" not in key:
+        raise ValueError(f"Invalid principal key: {key}")
+
+    principal_type, principal_id = key.split(":", 1)
+    principal_type = principal_type.strip()
+    principal_id = principal_id.strip()
+
+    if principal_type not in DOC_ACL_PRINCIPAL_TYPES:
+        raise ValueError(
+            f"principal_type '{principal_type}' is not allowed in document ACL. "
+            f"Allowed types: {DOC_ACL_PRINCIPAL_TYPES}"
+        )
+    if not principal_id:
+        raise ValueError(f"principal_id is empty: {key}")
+
+    return principal_type, principal_id
+
 
 def _values_table_for_principals(principals: Sequence[Principal]) -> sql.Composed:
     parts = [sql.SQL("(%s,%s,%s)") for _ in principals]
@@ -267,6 +298,18 @@ ORDER BY c.document_id
 
             for principal_key, effect in access_map.items():
                 ptype, pid = _parse_principal(principal_key)
+
+                if ptype not in DOC_ACL_PRINCIPAL_TYPES:
+                    overall_success = False
+                    errors.append({
+                        "principal": (ptype, pid),
+                        "error": (
+                            f"principal_type '{ptype}' is not allowed in document ACL. "
+                            f"Allowed types: {DOC_ACL_PRINCIPAL_TYPES}"
+                        ),
+                    })
+                    continue
+
                 eff = (effect or "").strip().lower()
                 if eff == "allow":
                     eff = "detail"  # backward-compat alias
@@ -352,6 +395,17 @@ ORDER BY c.document_id
                 "reason": f"document_id must be a UUID: {document_id!r}",
             }
 
+        if ptype not in DOC_ACL_PRINCIPAL_TYPES:
+            return {
+                "success": False,
+                "found_document": None,
+                "deleted": 0,
+                "reason": (
+                    f"principal_type '{ptype}' is not allowed in document ACL. "
+                    f"Allowed types: {DOC_ACL_PRINCIPAL_TYPES}"
+                ),
+            }
+
         conn = psycopg2.connect(self.pg_dsn)
         try:
             with conn, conn.cursor() as cur:
@@ -388,6 +442,39 @@ ORDER BY c.document_id
 
         finally:
             conn.close()
+
+    def list_document_access(self, *, document_id: str) -> List[Dict[str, Any]]:
+        """Return the current document_acl rows for a document.
+
+        Each row: {principal_type, principal_id, effect, created_at, updated_at}.
+        Raises ValueError if document_id is not a UUID.
+        """
+        db_document_id = str(document_id)
+        if not is_uuid(db_document_id):
+            raise ValueError(f"document_id must be a UUID: {document_id!r}")
+
+        q = """
+        SELECT principal_type, principal_id, effect, created_at, updated_at
+        FROM document_acl
+        WHERE tenant_id = %s AND document_id = %s
+        ORDER BY principal_type, principal_id
+        """
+
+        with psycopg2.connect(self.pg_dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(q, (self.tenant_id, db_document_id))
+                rows = cur.fetchall()
+
+        return [
+            {
+                "principal_type": r[0],
+                "principal_id": r[1],
+                "effect": r[2],
+                "created_at": r[3].isoformat() if r[3] else None,
+                "updated_at": r[4].isoformat() if r[4] else None,
+            }
+            for r in rows
+        ]
 
 
 def fetch_doc_access_for_user(
