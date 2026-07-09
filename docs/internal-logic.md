@@ -226,9 +226,23 @@ class SearchHit:
 | `department` | 部門名稱 | 部門規則 |
 | `role` | 角色名稱 | Keycloak 同步，**不用於文件 ACL** |
 
+> `role` 只存在於 `user_principal`（例：`dept:{X}:role:KM`），是 document-api 用來判斷「呼叫者是否具備某部門 KM 角色」的授權屬性；**文件 ACL（`document_acl`）本身只接受 `user` / `department`**（見 document-api `app/schemas/acl.py` 的 `DocAclPrincipalType`），從未直接寫入 `role`。
+
 ### 3.2 ACL 優先順序
 
 `user(30) > department(10)`，`deny(30) > detail(20) > summary(10)`
+
+### 3.3 部門 `detail` = 管理權限
+
+一個 department 對某文件是否具備「管理權限」（可上傳新版本、可改 ACL、可刪除），取決於它在該文件 `document_acl` 的 effect 是否為 `detail`：
+
+- 上傳時（`POST /v1/documents/upload`），`departments` 欄位列出的每個部門都會被自動寫入 `detail`。
+- 之後透過 `POST /v1/acl/write-map` 分享給其他部門，只能寫入 `summary`（僅供檢視）——write-map 會擋下任何「讓原本不具 `detail` 的部門取得 `detail`」的請求（回傳 403），除非該部門本來就已經是 `detail`（允許重新 assert 自己）。
+- document-api 的 KM 授權檢查（`require_document_km` → `managing_departments`）就是抓「目前 effect='detail' 的所有 department」的聯集，再檢查呼叫者是否為其中之一的 KM。
+
+### 3.4 ACL 端點的授權（document-api）
+
+`GET /v1/acl/{document_id}`／`POST /v1/acl/write-map`／`POST /v1/acl/delete-map` 皆需通過上述 KM 檢查：呼叫者需具備該文件管理部門之一的 KM 角色（`Authorization`/`X-User-Id`），或使用舊版 `X-Acl-Secret` admin bypass（略過逐一 KM 檢查，`user_id` 解析為 `None`）。詳細 request/response 格式見〈API 參考手冊〉。
 
 ---
 
@@ -313,12 +327,27 @@ settings.tools.marker_timeout     # Marker 超時秒數
                     running("stage: ingest")
                           │
                           ▼
+                    running("stage: acl")              # 僅在帶 access_rules 時執行
+                          │
+                          ▼
+                    running("stage: finalize_storage")
+                          │
+                          ▼
                          done
 
 任一階段例外 → failed（detail 含完整 traceback）
 ```
 
-**已知限制**：Job 狀態存於 in-memory dict，container 重啟後清空。
+**持久化**：`job_id`/`document_id` 皆為 UUID 時，狀態會 UPSERT 進 `ingest_jobs` 表，container 重啟後仍可查詢；不符合此條件的 job（例如非 UUID 的 ad-hoc 測試呼叫）僅存於 in-memory dict，重啟後清空。
+
+### 7.1 Job 暫存目錄清理
+
+- **失敗**：`_bg_full_pipeline` 的例外處理會立即 `shutil.rmtree` 整個 job temp dir（`work_dir`），失敗上傳不留孤兒檔案；失敗原因與完整 traceback 仍可透過 `GET /jobs/{job_id}` 查詢（持久化在 `ingest_jobs.detail`）。
+- **成功**：`finalize_storage` 階段完成後，同樣會刪除 job temp dir，清掉 marker/build_chunks 階段留下的中間產物——`LocalFileStorage.finalize()` 自己呼叫的 `rmdir()` 只有目錄已空時才會成功，先前這些中間檔案會一路留著不會自動清除。
+
+### 7.2 版本保留（version retention）
+
+每次成功 finalize 後，會呼叫 `LocalFileStorage.prune_old_versions(tenant_id, document_id, keep=5)`，只保留最新 5 個版本目錄，較舊版本目錄直接 `shutil.rmtree` 刪除。目前保留數量是寫死的常數 `MAX_VERSIONS_RETAINED = 5`（`ingest-worker/worker/main.py`），尚無環境變數可調整。
 
 ---
 

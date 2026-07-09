@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
 import psycopg2
 import requests
 import uvicorn
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from docblock_core.config import settings
@@ -25,6 +27,16 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Docblock Retrieve API", lifespan=lifespan)
+
+    # 前端網域未定案前留空，等同禁止所有瀏覽器跨網域存取；不影響 server-to-server 呼叫
+    allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.include_router(search_router, prefix="/v1")
 

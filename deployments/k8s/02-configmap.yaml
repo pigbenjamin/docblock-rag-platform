@@ -27,6 +27,9 @@ data:
   # Internal service URLs
   INGEST_WORKER_URL: "http://ingest-worker:8762"
 
+  # CORS：document-api/retrieve-api 允許的瀏覽器來源，逗號分隔；前端網域定案前留空
+  ALLOWED_ORIGINS: ""
+
   # Keycloak（使用 host IP，pod 內無法用 localhost；realm 名稱區分大小寫）
   KEYCLOAK_URL:        "https://10.90.20.55:8446"
   KEYCLOAK_REALM:      "FIRDI-AI-Platform"

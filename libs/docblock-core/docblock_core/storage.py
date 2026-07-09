@@ -50,3 +50,19 @@ class LocalFileStorage:
             pass  # not empty (other artifacts still in the job dir) - leave it
 
         return final_path
+
+    def prune_old_versions(self, *, tenant_id: str, document_id: str, keep: int) -> None:
+        """Delete version directories beyond the newest `keep`, e.g. after a
+        successful finalize bumps the active version."""
+        doc_dir = self.base_dir / tenant_id / document_id
+        if not doc_dir.is_dir():
+            return
+
+        version_dirs = []
+        for entry in doc_dir.iterdir():
+            if entry.is_dir() and entry.name.startswith("v") and entry.name[1:].isdigit():
+                version_dirs.append((int(entry.name[1:]), entry))
+        version_dirs.sort(key=lambda item: item[0])
+
+        for _, old_dir in version_dirs[:-keep]:
+            shutil.rmtree(old_dir, ignore_errors=True)

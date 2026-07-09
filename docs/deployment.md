@@ -66,6 +66,12 @@ RERANK_MODEL=
 # ── Ingest worker / Marker ──────────────────────────────────────
 LITELLM_PROXY_URL=http://your-litellm-host:port   # marker/pdf-to-md 路由
 
+# ── CORS（document-api + retrieve-api 共用）──────────────────────
+# 允許的瀏覽器跨網域來源，逗號分隔可填多個；預設空字串 = 不開放任何瀏覽器跨網域
+# 存取（server-to-server 呼叫不受影響）。待前端網域定案後，填入該網域即可，
+# 不需改程式碼。
+ALLOWED_ORIGINS=
+
 # ── Document API ──────────────────────────────────────────────
 ACL_ADMIN_SECRET=dev-secret-change-me
 INGEST_WORKER_URL=http://ingest-worker:8762
@@ -274,3 +280,9 @@ grep LITELLM_API_KEY deployments/compose/.env
 docker compose down -v   # 刪除 postgres_data volume
 docker compose up -d
 ```
+
+### 瀏覽器前端呼叫 API 時出現 CORS 錯誤
+
+原因：`ALLOWED_ORIGINS` 預設為空字串，尚未開放任何瀏覽器跨網域來源（server-to-server 呼叫不受影響，只有瀏覽器發出的 fetch/XHR 會被擋）。
+
+解法：在 `.env`（本地開發）或 `deployments/k8s/02-configmap.yaml`（正式環境）將前端網域填入 `ALLOWED_ORIGINS`（逗號分隔可填多個），套用方式同其他環境變數變更（`docker compose up -d --no-build <service>` 或 k8s 重新套用 configmap 後 rollout restart）。

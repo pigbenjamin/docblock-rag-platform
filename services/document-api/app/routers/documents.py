@@ -23,6 +23,31 @@ UPLOAD_DIR = Path("/data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 storage = LocalFileStorage(UPLOAD_DIR)
 
+# 目前 pipeline 只走 marker 處理 PDF；docx/xlsx/pptx 轉檔路由尚未實作（見 future-office-format-routing 備忘）
+ALLOWED_UPLOAD_EXTENSIONS = {".pdf"}
+ALLOWED_UPLOAD_CONTENT_TYPES = {"application/pdf"}
+MAX_UPLOAD_SIZE_BYTES = 100 * 1024 * 1024  # 100MB
+_READ_CHUNK_SIZE = 1024 * 1024  # 1MB
+
+
+async def _read_within_limit(file: UploadFile) -> bytes:
+    """Read an upload in chunks, aborting as soon as MAX_UPLOAD_SIZE_BYTES is
+    exceeded instead of buffering an arbitrarily large file before checking."""
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_SIZE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"file exceeds max upload size of {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)}MB",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
 
 def _db_conn():
     return psycopg2.connect(settings.db.pg_dsn)
@@ -74,7 +99,19 @@ async def upload_document(
     job_id = str(uuid.uuid4())
     safe_filename = Path(file.filename or "upload.pdf").name
 
-    content = await file.read()
+    ext = Path(safe_filename).suffix.lower()
+    if ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"unsupported file extension '{ext}'; only PDF is currently supported",
+        )
+    if file.content_type and file.content_type not in ALLOWED_UPLOAD_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"unsupported content-type '{file.content_type}'; only application/pdf is currently supported",
+        )
+
+    content = await _read_within_limit(file)
     pdf_path = storage.save_temp(job_id, safe_filename, content)
 
     access_rules: Dict[str, str] = {f"department:{dept}": "detail" for dept in departments}

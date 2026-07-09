@@ -4,6 +4,12 @@
 
 ---
 
+## CORS
+
+`retrieve-api`、`document-api` 皆掛載 `CORSMiddleware`，允許的來源由 `ALLOWED_ORIGINS` 環境變數控制（逗號分隔多個網域）。目前預設為空字串——代表尚未開放任何瀏覽器跨網域存取（server-to-server 呼叫不受影響）。待前端網域定案後，需將該網域填入此環境變數，詳見〈部署指南〉。
+
+---
+
 ## retrieve-api（Port 8761）
 
 語意搜尋與 RAG 問答服務。
@@ -51,7 +57,7 @@
     "user_id": "11111111-0001-0001-0001-000000000001",
     "principals": [
       ["user", "11111111-0001-0001-0001-000000000001"],
-      ["department", "dept-A"]
+      ["department", "A"]
     ]
   },
   "document_ids_used": ["xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"],
@@ -155,13 +161,25 @@
 
 上傳 PDF，自動觸發 ingest-worker 全流程。
 
+**身份驗證**（擇一）
+
+| Header | 說明 |
+|--------|------|
+| `Authorization: Bearer <token>` | 建議方式。Keycloak access token，於 document-api 本地驗簽（JWKS） |
+| `X-User-Id: <uuid>` | 舊版相容 fallback，待前端/測試全面遷移至 JWT 後移除 |
+
+兩者皆缺 → 401。呼叫者必須在 `departments` 列出的部門中，至少一個持有該部門的 KM 角色，否則回傳 403。
+
 **Request**：`multipart/form-data`
 
 | 欄位 | 類型 | 必填 | 說明 |
 |------|------|------|------|
-| `file` | File | ✓ | PDF 檔案 |
+| `file` | File | ✓ | PDF 檔案。僅接受 `.pdf` 副檔名 + `application/pdf` content-type，否則回傳 415；大小上限 100MB，超過回傳 413 |
 | `document_id` | UUID string | — | 省略 → 建立新文件（伺服器生成新 UUID）；帶既有 document_id → 該文件的新版本 |
 | `title` | string | — | 文件標題 |
+| `departments` | string[] | ✓ | 文件所屬部門，至少一個。每個列出的部門，加上上傳者本人，會自動取得 `detail`（管理）權限；上傳當下不能自訂其他 access_rules，需另外呼叫 ACL 端點 |
+
+> **注意（未來規劃）**：目前 pipeline 只處理 PDF（Marker OCR）。Office 格式（docx/xlsx/pptx）尚未支援——`ingest_jobs.source_type` 欄位雖存在，但目前恆為 `'pdf'`，尚無對應的轉檔路由邏輯。
 
 **Response**
 
@@ -169,7 +187,10 @@
 {
   "job_id": "550e8400-e29b-41d4-a716-446655440000",
   "document_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "status": "submitted"
+  "filename": "IT-OT_Policy.pdf",
+  "departments": ["A"],
+  "status": "submitted",
+  "ingest_worker_response": { "job_id": "550e8400-e29b-41d4-a716-446655440000", "status": "pending" }
 }
 ```
 
@@ -191,32 +212,76 @@
 
 ### DELETE /v1/documents/{document_id}
 
-刪除文件及所有 chunks 與 ACL（CASCADE）。
+刪除文件及所有 chunks 與 ACL（CASCADE）。需具備該文件管理部門之一的 KM 角色（`Authorization`/`X-User-Id`），或使用舊版 `X-Acl-Secret` admin bypass。
 
 ---
 
-### POST /v1/acl/write-map
+### GET /v1/departments
 
-**Headers**：`X-Acl-Secret: <ACL_ADMIN_SECRET>`
+列出 Keycloak 頂層群組（A/B/C/...）作為部門清單，供前端下拉選單使用（透過 `user-sync-service` client 即時查詢 Keycloak admin API）。
+
+**Response**
+
+```json
+[
+  { "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "name": "A" },
+  { "id": "8f14e45f-ceea-4c9a-8b1a-000000000000", "name": "B" }
+]
+```
+
+> 純資訊性質，**不參與任何授權判斷**——授權一律查詢 `user_principal` 表，不會查這支端點。
+
+---
+
+### GET /v1/acl/{document_id}
+
+查詢文件目前的 access_rules。
+
+**Headers**：與下方 write-map/delete-map 相同。
+
+**Response**
 
 ```json
 {
   "document_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "access_rules": [
-    { "principal_type": "department", "principal_id": "dept-A", "effect": "detail" },
+    { "principal_type": "department", "principal_id": "A", "effect": "detail" },
     { "principal_type": "user", "principal_id": "11111111-...", "effect": "deny" }
   ]
 }
 ```
 
-### POST /v1/acl/delete-map
+### POST /v1/acl/write-map
 
-**Headers**：`X-Acl-Secret: <ACL_ADMIN_SECRET>`
+**Headers**（擇一）
+
+| Header | 說明 |
+|--------|------|
+| `Authorization: Bearer <token>` 或 `X-User-Id: <uuid>` | 需具備該文件「管理部門」（`document_acl` 中 `effect='detail'` 的 department）之一的 KM 角色 |
+| `X-Acl-Secret: <ACL_ADMIN_SECRET>` | 舊版相容 admin bypass，略過逐一 KM 檢查 |
 
 ```json
 {
   "document_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "principals": ["user:11111111-...", "department:dept-B"]
+  "access_rules": [
+    { "principal_type": "department", "principal_id": "A", "effect": "detail" },
+    { "principal_type": "user", "principal_id": "11111111-...", "effect": "deny" }
+  ]
+}
+```
+
+`principal_type` 僅接受 `user` / `department`（`role` 只是 `user_principal` 的用戶屬性，用於 KM 授權檢查，不會寫入文件 ACL）。
+
+> **分享限制**：write-map 不能讓「原本不具 `detail` 的 department」取得 `detail`（管理權限）——`detail` 只在上傳時由 document-api 自動授予；已具 `detail` 的部門可重新 assert 自己的 `detail`，其餘部門只能被分享為 `summary`。違反回傳 403。
+
+### POST /v1/acl/delete-map
+
+**Headers**：同上（`Authorization`/`X-User-Id` + KM 角色，或 `X-Acl-Secret`）
+
+```json
+{
+  "document_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "principals": ["user:11111111-...", "department:B"]
 }
 ```
 
@@ -292,7 +357,11 @@ PDF ingest pipeline，各端點背景執行並立即回傳 job_id。
 | 代碼 | 說明 |
 |------|------|
 | 200 | 成功 |
-| 403 | 權限不足（ACL 拒絕） |
+| 401 | 未認證（缺少 Authorization/X-User-Id，或 JWT 驗簽失敗） |
+| 403 | 權限不足（ACL 拒絕，或不具 KM 角色） |
 | 404 | 資源不存在 |
+| 413 | 上傳檔案超過大小限制（100MB） |
+| 415 | 上傳檔案類型不受支援（僅接受 PDF） |
 | 422 | 請求格式錯誤 |
 | 500 | 伺服器內部錯誤（含 LLM timeout） |
+| 502 | 上游服務異常（如 Keycloak admin API 無法連線或權限不足） |

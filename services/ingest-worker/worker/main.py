@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import traceback
 import uuid
 from pathlib import Path
@@ -24,6 +25,8 @@ app = FastAPI(title="Docblock Ingest Worker")
 
 UPLOAD_DIR = Path("/data/uploads")
 storage = LocalFileStorage(UPLOAD_DIR)
+
+MAX_VERSIONS_RETAINED = 5
 
 # In-memory fallback, used only for jobs that don't carry a resolvable
 # (tenant_id, document_id) at submission time (e.g. a bare /jobs/marker call
@@ -211,10 +214,13 @@ async def _bg_full_pipeline(
         _set_status(job_id, JobStatus.running, "stage: finalize_storage", stage="finalize_storage", tenant_id=tenant_id, document_id=document_id, created_by=created_by)
         final_path = storage.finalize(tenant_id=tenant_id, document_id=db_document_id, version=version, temp_path=pdf_path)
         _update_document_source_path(tenant_id, db_document_id, str(final_path))
+        storage.prune_old_versions(tenant_id=tenant_id, document_id=db_document_id, keep=MAX_VERSIONS_RETAINED)
 
         _set_status(job_id, JobStatus.done, "all stages complete", stage="done", tenant_id=tenant_id, document_id=document_id, created_by=created_by)
+        shutil.rmtree(work_dir, ignore_errors=True)
     except Exception:
         _set_status(job_id, JobStatus.failed, traceback.format_exc(), stage="failed", tenant_id=tenant_id, document_id=document_id, created_by=created_by)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 @app.post("/jobs/marker")

@@ -111,6 +111,13 @@ user_principal (tenant_id, user_id UUID, principal_type, principal_id)
 
 上傳時帶既有 `document_id`（同一份邏輯文件）：內容相同（sha256 不變）→ 不建新版本；內容有變 → `active_version + 1`，舊版 chunks 保留但搜尋時僅查現行版本。不帶 `document_id` → 一律視為新文件，生成新 UUID。
 
+### 儲存清理與版本保留
+
+- 上傳暫存於 job-scoped temp dir（`UPLOAD_DIR/{job_id}/`），ingest pipeline 解出版本號後由 `LocalFileStorage.finalize()` 搬到正式路徑 `{tenant}/{document_id}/v{n}/`。
+- **Pipeline 失敗**：ingest-worker 立即 `shutil.rmtree` 整個 job temp dir，不留孤兒檔案；失敗原因/traceback 仍可透過 `GET /jobs/{job_id}`（持久化於 `ingest_jobs.detail`）查詢。
+- **Pipeline 成功**：`finalize()` 之後也會刪除 job temp dir，清掉 marker/build_chunks 階段留下的中間產物——`finalize()` 自身的 `rmdir()` 只有目錄已空時才會成功，先前這些中間檔案會一路堆積下去。
+- **版本保留**：每次成功 finalize 後呼叫 `LocalFileStorage.prune_old_versions(tenant_id, document_id, keep=5)`，只保留最新 5 個版本目錄，較舊的直接 `shutil.rmtree` 刪除。目前是寫死的常數 `MAX_VERSIONS_RETAINED = 5`（`ingest-worker/worker/main.py`），尚未提供環境變數可調整。
+
 ### ACL 表結構
 
 ```sql
@@ -155,6 +162,35 @@ SELECT ...
 ```
 
 無匹配規則時預設 `deny`。
+
+---
+
+## 身份驗證與部門授權（document-api）
+
+### JWT 驗證
+
+`document-api` 解析呼叫者身份的方式（`app/auth.py`）：
+
+- 優先使用 `Authorization: Bearer <token>`：本地以 Keycloak realm 的 JWKS 驗簽（RS256）。JWKS 快取 10 分鐘，`kid` 未命中時強制重新抓取一次（因應 Keycloak 金鑰輪替）。
+- 若無 Authorization header，fallback 至舊版 `X-User-Id: <uuid>` header（待前端/測試全面遷移至 JWT 後移除）。
+- 兩者皆缺 → 401。
+
+**Issuer 與 JWKS URL 刻意來自不同來源**：
+
+- `issuer` 從 Keycloak 的 `.well-known/openid-configuration` discovery 文件讀取，而非直接假設等於 `KEYCLOAK_URL`——Keycloak 對外宣告的 issuer 主機名稱可能與 `KEYCLOAK_URL`（document-api 實際可連到的內部位址）不同。
+- JWKS URL 則直接用 `KEYCLOAK_URL` 組出（`/realms/{realm}/protocol/openid-connect/certs`），**不採用** discovery 文件內的 `jwks_uri`——該欄位所指的外部主機名稱可能無法從 document-api 連線到（已於 dev 環境確認：該主機名可解析但連線逾時，`KEYCLOAK_URL` 則正常）。
+
+### 部門 KM 授權模型
+
+Keycloak realm `FIRDI-AI-Platform` 下，每個部門（A/B/C/...）各自有 `Dev`/`KM`/`User` 子群組。屬於某部門的 `KM` 群組 = 有權上傳/管理該部門的文件（**部門範圍**，非全域權限）。
+
+授權檢查**查詢資料庫，不查 JWT 的角色 claims**：`webhook-service` 將 Keycloak 群組成員異動同步進 `user_principal` 表，寫入 `principal_type='role', principal_id='dept:{X}:role:KM'`；`require_department_km(user_id, departments, mode="any"|"all")` 即查此表判斷呼叫者是否具備列出部門（任一或全部）的 KM 角色。
+
+**「管理部門」的判斷**（`managing_departments(document_id)`）：一個部門對某文件是否具備管理權限，取決於它在 `document_acl` 的 effect 是否為 `'detail'`——上傳時列出的部門會被寫入 `detail`；之後才透過分享加入的部門則是 `'summary'`（僅供檢視，無管理權）。`require_document_km` 即以「文件目前所有 `detail` 部門」的聯集做 KM 檢查。
+
+### 舊版相容 bypass
+
+ACL 管理與刪除端點另外接受 `X-Acl-Secret: <ACL_ADMIN_SECRET>` header（`get_current_user_id_or_admin_secret`），驗證通過則完全略過逐一 KM 檢查——此為 JWT 導入前的舊行為，暫時保留，之後會移除。
 
 ---
 
