@@ -6,14 +6,16 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 import psycopg2
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
 
 from app.config import settings
+from docblock_core.storage import LocalFileStorage
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 UPLOAD_DIR = Path("/data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+storage = LocalFileStorage(UPLOAD_DIR)
 
 
 def _db_conn():
@@ -33,6 +35,8 @@ async def upload_document(
     file: UploadFile = File(...),
     document_id: Optional[str] = Form(None),
     title: str = Form(""),
+    departments: List[str] = Form(...),
+    x_user_id: str = Header(..., alias="X-User-Id"),
 ) -> Dict[str, Any]:
     """
     Upload a PDF, save it to shared storage, then trigger the full ingest pipeline
@@ -41,33 +45,46 @@ async def upload_document(
     - Omit `document_id` to create a new document (a fresh UUID is generated).
     - Pass an existing `document_id` to upload a new version of that document:
       unchanged content keeps the current version; changed content bumps it.
+    - `departments`: at least one department this document belongs to. Each
+      listed department, plus the uploader, is automatically granted `detail`
+      access; no other access_rules can be set at upload time - use the ACL
+      endpoints afterwards for anything more specific.
+    - `X-User-Id`: uploader identity. Plain header for now (no JWT auth until
+      phase 4); will become the verified JWT `sub` claim then.
     """
     if document_id is not None and not _is_uuid(document_id):
         raise HTTPException(status_code=400, detail="document_id must be a UUID")
 
+    if not _is_uuid(x_user_id):
+        raise HTTPException(status_code=400, detail="X-User-Id must be a UUID")
+
+    departments = [d.strip() for d in departments if d.strip()]
+    if not departments:
+        raise HTTPException(status_code=400, detail="at least one department is required")
+
     resolved_document_id = document_id or str(uuid.uuid4())
 
     job_id = str(uuid.uuid4())
-    dest_dir = UPLOAD_DIR / job_id
-    dest_dir.mkdir(parents=True)
-
     safe_filename = Path(file.filename or "upload.pdf").name
-    pdf_path = dest_dir / safe_filename
 
     content = await file.read()
-    pdf_path.write_bytes(content)
+    pdf_path = storage.save_temp(job_id, safe_filename, content)
 
-    work_dir = str(dest_dir)
+    access_rules: Dict[str, str] = {f"department:{dept}": "detail" for dept in departments}
+    access_rules[f"user:{x_user_id}"] = "detail"
+
     payload = {
         "job_id": job_id,
         "pdf_path": str(pdf_path),
-        "work_dir": work_dir,
+        "work_dir": str(pdf_path.parent),
         "document_id": resolved_document_id,
         "source_path": str(pdf_path),
         "title": title or None,
         "original_filename": safe_filename,
         "file_size": len(content),
         "mime_type": file.content_type,
+        "created_by": x_user_id,
+        "access_rules": access_rules,
     }
 
     async with httpx.AsyncClient(timeout=10) as client:
@@ -81,6 +98,7 @@ async def upload_document(
         "job_id": job_id,
         "document_id": resolved_document_id,
         "filename": safe_filename,
+        "departments": departments,
         "status": "submitted",
         "ingest_worker_response": resp.json(),
     }

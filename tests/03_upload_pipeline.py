@@ -1,8 +1,9 @@
 """
 03 Upload & Full Pipeline
-POST /v1/documents/upload — 上傳 PDF（不帶 document_id，由伺服器生成新 UUID），觸發完整 ingest pipeline
+POST /v1/documents/upload — 上傳 PDF（不帶 document_id，由伺服器生成新 UUID），
+  帶必填 departments + X-User-Id，觸發完整 ingest pipeline
 GET  /v1/documents/job/{job_id} — 每 5 秒輪詢，直到 done 或 failed
-最後確認文件出現於 GET /v1/documents/
+最後確認文件出現於 GET /v1/documents/，並驗證自動部門 ACL 生效（dept-A 用戶可 detail 存取）
 """
 import sys, os, time
 sys.path.insert(0, os.path.dirname(__file__))
@@ -17,6 +18,9 @@ if not os.path.exists(TEST_PDF):
     fail("請先執行：docker cp compose-ingest-worker-1:/data/uploads/104fa00d-.../deptA_IT-OT_Network_Policy.pdf tests/fixtures/test.pdf")
     summary()
 
+UPLOAD_DEPARTMENT = "dept-A"     # u001 已在 user_principal 屬於此部門（見 config.py 註解）
+UPLOADER_USER_ID   = USERS["u001"]
+
 info(f"上傳新文件（不指定 document_id，由伺服器生成），PDF={TEST_PDF}")
 
 # ── 1. 上傳 PDF ──────────────────────────────────────────────
@@ -25,7 +29,8 @@ with open(TEST_PDF, "rb") as f:
     r = requests.post(
         f"{DOCUMENT_API}/v1/documents/upload",
         files={"file": ("test.pdf", f, "application/pdf")},
-        data={"title": "Test Upload Document"},
+        data={"title": "Test Upload Document", "departments": [UPLOAD_DEPARTMENT]},
+        headers={"X-User-Id": UPLOADER_USER_ID},
         timeout=30,
     )
 
@@ -43,6 +48,33 @@ if job_id and document_id and body.get("status") == "submitted":
 else:
     fail(f"upload 回應格式錯誤：{body}")
     summary()
+
+# ── 1b. 缺少必填欄位 → 預期 4xx ─────────────────────────────
+info("POST /v1/documents/upload（缺少 departments）→ 預期 4xx")
+with open(TEST_PDF, "rb") as f:
+    r_missing_dept = requests.post(
+        f"{DOCUMENT_API}/v1/documents/upload",
+        files={"file": ("test.pdf", f, "application/pdf")},
+        headers={"X-User-Id": UPLOADER_USER_ID},
+        timeout=30,
+    )
+if 400 <= r_missing_dept.status_code < 500:
+    ok(f"缺少 departments → HTTP {r_missing_dept.status_code}（正確拒絕）")
+else:
+    fail(f"缺少 departments → 預期 4xx，got {r_missing_dept.status_code}")
+
+info("POST /v1/documents/upload（缺少 X-User-Id）→ 預期 4xx")
+with open(TEST_PDF, "rb") as f:
+    r_missing_user = requests.post(
+        f"{DOCUMENT_API}/v1/documents/upload",
+        files={"file": ("test.pdf", f, "application/pdf")},
+        data={"departments": [UPLOAD_DEPARTMENT]},
+        timeout=30,
+    )
+if 400 <= r_missing_user.status_code < 500:
+    ok(f"缺少 X-User-Id → HTTP {r_missing_user.status_code}（正確拒絕）")
+else:
+    fail(f"缺少 X-User-Id → 預期 4xx，got {r_missing_user.status_code}")
 
 # ── 2. 輪詢進度 ──────────────────────────────────────────────
 info("輪詢 GET /v1/documents/job/{job_id}（最多等 5 分鐘）")
@@ -90,5 +122,21 @@ if final_status == "done":
         print(f"  version     : {d['active_version']}")
     else:
         fail(f"文件建立後查不到 → HTTP {r.status_code}")
+
+    # ── 4. 驗證上傳自動寫入的部門 ACL 生效 ─────────────────────
+    info(f"驗證自動部門 ACL：u001（{UPLOAD_DEPARTMENT}）應可 detail 存取新文件")
+    r = requests.post(
+        f"{RETRIEVE_API}/v1/search",
+        json={"query": "test", "user_id": USERS["u001"], "document_ids": [document_id], "top_k": 5},
+        timeout=SEARCH_TIMEOUT,
+    )
+    if r.status_code == 200:
+        access = r.json().get("access", {}).get(document_id, "deny")
+        if access == "detail":
+            ok(f"u001 access={access}（部門 ACL 生效）")
+        else:
+            fail(f"u001 access={access}（預期 detail — 部門 ACL 未生效，檢查 department principal_id 是否對齊）")
+    else:
+        fail(f"部門 ACL 驗證 search → HTTP {r.status_code}")
 
 summary()

@@ -51,7 +51,10 @@ class UserSyncService:
 
                 principals.append({
                     "principal_type": "department",
-                    "principal_id": f"dept:{dept}",
+                    # NOTE: no "dept:" prefix here - document_acl stores the raw
+                    # department value (see ACLService.write_access._parse_principal),
+                    # and fetch_doc_access_map joins on principal_id equality.
+                    "principal_id": dept,
                 })
 
             if len(parts) >= 2 and parts[0] and parts[1]:

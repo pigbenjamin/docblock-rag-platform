@@ -16,6 +16,7 @@ def run_build_chunks(
     original_filename: Optional[str] = None,
     file_size: Optional[int] = None,
     mime_type: Optional[str] = None,
+    created_by: Optional[str] = None,
 ) -> str:
     """Build chunk_block.json from a fixed Markdown file. Returns the output JSON path."""
     return build_blocks(
@@ -28,6 +29,7 @@ def run_build_chunks(
         original_filename=original_filename,
         file_size=file_size,
         mime_type=mime_type,
+        created_by=created_by,
         seg_model=settings.models.seg_model,
         ollama_gen_url=settings.models.litellm_base_url,
         infer_table_capabilities=settings.chunking.infer_table_capabilities,

@@ -436,7 +436,7 @@ def ingest_to_db(
     embed_timeout: int = 120,
     skip_embedding_errors: bool = True,
     logger: Optional[logging.Logger] = None,
-) -> None:
+) -> Tuple[str, int]:
     """
     Core ingest entrypoint (API-ready).
 
@@ -446,6 +446,8 @@ def ingest_to_db(
       - content_sha256
       - source_path, md_path, title(optional)
       - original_filename, file_size, mime_type, external_ref, created_by (all optional)
+
+    Returns (document_id, active_version).
     """
     bundle = json.loads(Path(chunk_block_json).read_text(encoding="utf-8"))
     doc = bundle["doc"]
@@ -499,7 +501,7 @@ def ingest_to_db(
                 db_document_id, version,
             )
             conn.close()
-            return
+            return db_document_id, version
 
         text_rows = []
         table_rows = []
@@ -726,6 +728,8 @@ def ingest_to_db(
                 db_document_id, version,
             )
 
+        return db_document_id, version
+
     except Exception:
         conn.rollback()
         raise
@@ -798,7 +802,7 @@ def ingest_sum(
 
 
 # Backwards-compatible CLI wrapper (optional)
-def ingest(bundle_path: str) -> None:
+def ingest(bundle_path: str) -> Tuple[str, int]:
     """Ingest a chunk_block.json bundle to PostgreSQL using env vars.
 
     Required env:
@@ -811,6 +815,8 @@ def ingest(bundle_path: str) -> None:
       - SUMMARY_TIMEOUT
       - EMBED_TIMEOUT
       - VISION_DEVICE
+
+    Returns (document_id, active_version).
     """
     pg_dsn = settings.db.pg_dsn
     ollama_base_url = settings.models.ollama_base_url
