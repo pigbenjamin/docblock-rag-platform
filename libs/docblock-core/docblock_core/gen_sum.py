@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from docblock_core.llm_http import litellm_headers
 
 from docblock_core.jobs import sha256_text
 
@@ -112,9 +113,9 @@ def split_md_into_sections(md: str) -> List[MdSection]:
 # -----------------------------
 
 def call_llm(system: str, user: str) -> str:
-    """Call LLM via OpenAI /v1/chat/completions (routes through nostr-proxy in k8s)."""
+    """Call LLM via OpenAI /v1/chat/completions (LiteLLM)."""
     base_url = os.getenv("LITELLM_BASE_URL", "http://localhost:4000").strip()
-    model = os.getenv("LLM_MODEL", "").strip() or os.getenv("SUMMARY_MODEL", "").strip() or "qwen3.5-9b"
+    model = os.getenv("LLM_MODEL", "").strip() or os.getenv("SUMMARY_MODEL", "").strip() or "gemma-4-26B-A4B-it"
     timeout = int(os.getenv("OLLAMA_TIMEOUT", "180"))
 
     endpoint = base_url.rstrip("/") + "/v1/chat/completions"
@@ -131,7 +132,7 @@ def call_llm(system: str, user: str) -> str:
     }
 
     try:
-        r = requests.post(endpoint, json=payload, timeout=timeout)
+        r = requests.post(endpoint, json=payload, headers=litellm_headers(), timeout=timeout)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -143,19 +144,19 @@ def call_llm(system: str, user: str) -> str:
     return out.strip()
 
 def call_embed(text: str) -> List[float]:
-    """Call embedding via OpenAI /v1/embeddings (routes through nostr-proxy in k8s)."""
+    """Call embedding via OpenAI /v1/embeddings (LiteLLM)."""
     base_url = os.getenv("LITELLM_BASE_URL", "http://localhost:4000").strip()
-    model = os.getenv("EMBED_MODEL", "").strip() or "qwen3-embedding"
+    model = os.getenv("EMBED_MODEL", "").strip() or "embeddinggemma-300m"
     timeout = int(os.getenv("EMBED_TIMEOUT", os.getenv("OLLAMA_TIMEOUT", "120")))
 
     endpoint = base_url.rstrip("/") + "/v1/embeddings"
     payload: Dict[str, Any] = {
         "model": model,
-        "input": text,
+        "input": os.getenv("EMBED_DOC_PREFIX", "title: none | text: ") + text,
     }
 
     try:
-        r = requests.post(endpoint, json=payload, timeout=timeout)
+        r = requests.post(endpoint, json=payload, headers=litellm_headers(), timeout=timeout)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
