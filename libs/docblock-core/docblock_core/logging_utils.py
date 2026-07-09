@@ -7,7 +7,7 @@ from typing import Optional
 
 _LOG_FORMAT = (
     "%(asctime)s | %(levelname)s | %(name)s | "
-    "job_id=%(job_id)s doc_id=%(doc_id)s | %(message)s"
+    "job_id=%(job_id)s document_id=%(document_id)s | %(message)s"
 )
 
 LOG_FORMAT = (
@@ -41,8 +41,8 @@ class ContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, "job_id"):
             record.job_id = "-"
-        if not hasattr(record, "doc_id"):
-            record.doc_id = "-"
+        if not hasattr(record, "document_id"):
+            record.document_id = "-"
         return True
 
 

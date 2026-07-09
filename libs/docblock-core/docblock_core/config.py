@@ -29,20 +29,24 @@ class ChunkingSettings:
 
     infer_table_capabilities: bool = _env_bool("INFER_TABLE_CAPABILITIES", True)
     summarize_tables: bool = _env_bool("SUMMARIZE_TABLES", False)
-    capabilities_model: Optional[str] = os.getenv("CAPABILITIES_MODEL", "qwen3.5-9b")
+    capabilities_model: Optional[str] = os.getenv("CAPABILITIES_MODEL", "gemma-4-26B-A4B-it")
 
 
 @dataclass
 class ModelSettings:
     # segmentation / structure extraction
-    seg_model: str = os.getenv("SEG_MODEL", "qwen3.5-9b")
-    ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    seg_model: str = os.getenv("SEG_MODEL", "gemma-4-26B-A4B-it")
     litellm_base_url: str = os.getenv("LITELLM_BASE_URL", "http://localhost:4000")
-    # alias: legacy code reads ollama_gen_url; routes through litellm (→ nostr-proxy in k8s)
+    # deprecated aliases: legacy code reads ollama_base_url / ollama_gen_url;
+    # both now route to the same OpenAI-compatible LiteLLM endpoint
+    ollama_base_url: str = os.getenv("LITELLM_BASE_URL", "http://localhost:4000")
     ollama_gen_url: str = os.getenv("LITELLM_BASE_URL", "http://localhost:4000")
-    embed_model: str = os.getenv("EMBED_MODEL", "qwen3-embedding")
-    summary_model: str = os.getenv("SUMMARY_MODEL", "qwen3.5-9b")
-    chat_model: str = os.getenv("CHAT_MODEL", "qwen3.5-9b")
+    embed_model: str = os.getenv("EMBED_MODEL", "embeddinggemma-300m")
+    # EmbeddingGemma task prompts（模型卡要求；若 serving 端已自動加前綴，設成空字串 "" 停用）
+    embed_query_prefix: str = os.getenv("EMBED_QUERY_PREFIX", "task: search result | query: ")
+    embed_doc_prefix: str = os.getenv("EMBED_DOC_PREFIX", "title: none | text: ")
+    summary_model: str = os.getenv("SUMMARY_MODEL", "gemma-4-26B-A4B-it")
+    chat_model: str = os.getenv("CHAT_MODEL", "gemma-4-26B-A4B-it")
     
     # vision
     vision_device: str = os.getenv("VISION_DEVICE", "cuda")
@@ -54,7 +58,8 @@ class ModelSettings:
     summary_timeout: int = int(os.getenv("SUMMARY_TIMEOUT", "180"))
     
     # reranker
-    rerank_model: str = os.getenv("RERANK_MODEL", "qwen3-reranker-8b")
+    # rerank 服務已於 2026-07 自外部 LiteLLM 移除；留空時 rerank 呼叫失敗會 fallback 原始排序
+    rerank_model: str = os.getenv("RERANK_MODEL", "")
     
     # hf offline setting
     #hf_offline: bool = os.getenv("HF_HUB_OFFLINE", "1")
@@ -72,21 +77,16 @@ class DBSettings:
 
 @dataclass
 class OutlineSettings:
-    outline_url: str = os.getenv("OUTLINE_URL", "https://125.228.83.116:49312")
-    api_token: str = os.getenv("OUTLINE_API_TOKEN", "ol_api_Lrmv42UdfvdXOgNEwWz73QKmkU92rDvkkONUMM")
+    outline_url: str = os.getenv("OUTLINE_URL", "")
+    api_token: str = os.getenv("OUTLINE_API_TOKEN", "")
 
 
 @dataclass
 class ToolSettings:
-    # ✅ 建議用 out_dir 模式（最符合你目前 marker 實際 CLI）
-    # 例：marker_single "in.pdf" --output_dir "outdir"
-    marker_cmd: str = os.getenv(
-        "MARKER_CMD",
-        'marker_single "{pdf}" --output_dir "{out_dir}"'
-    )
+    # HTTP client timeout while waiting for the marker/pdf-to-md LiteLLM route
     marker_timeout: int = int(os.getenv("MARKER_TIMEOUT", "1800"))
 
-    # LiteLLM proxy — used by ingest-worker to reach marker-service
+    # LiteLLM proxy — used by ingest-worker to reach the marker/pdf-to-md route (external)
     litellm_proxy_url: str = os.getenv("LITELLM_PROXY_URL", "http://localhost:4000")
     litellm_api_key: str = os.getenv("LITELLM_API_KEY", "sk-litellm-internal")
 

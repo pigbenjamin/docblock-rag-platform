@@ -20,20 +20,39 @@ def _db_conn():
     return psycopg2.connect(settings.db.pg_dsn)
 
 
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+        return True
+    except ValueError:
+        return False
+
+
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    doc_id: str = Form(...),
+    document_id: Optional[str] = Form(None),
     title: str = Form(""),
 ) -> Dict[str, Any]:
     """
     Upload a PDF, save it to shared storage, then trigger the full ingest pipeline
     on ingest-worker (marker → build_chunks → ingest).
+
+    - Omit `document_id` to create a new document (a fresh UUID is generated).
+    - Pass an existing `document_id` to upload a new version of that document:
+      unchanged content keeps the current version; changed content bumps it.
     """
+    if document_id is not None and not _is_uuid(document_id):
+        raise HTTPException(status_code=400, detail="document_id must be a UUID")
+
+    resolved_document_id = document_id or str(uuid.uuid4())
+
     job_id = str(uuid.uuid4())
     dest_dir = UPLOAD_DIR / job_id
     dest_dir.mkdir(parents=True)
-    pdf_path = dest_dir / file.filename
+
+    safe_filename = Path(file.filename or "upload.pdf").name
+    pdf_path = dest_dir / safe_filename
 
     content = await file.read()
     pdf_path.write_bytes(content)
@@ -43,8 +62,12 @@ async def upload_document(
         "job_id": job_id,
         "pdf_path": str(pdf_path),
         "work_dir": work_dir,
-        "doc_id": doc_id,
+        "document_id": resolved_document_id,
         "source_path": str(pdf_path),
+        "title": title or None,
+        "original_filename": safe_filename,
+        "file_size": len(content),
+        "mime_type": file.content_type,
     }
 
     async with httpx.AsyncClient(timeout=10) as client:
@@ -56,8 +79,8 @@ async def upload_document(
 
     return {
         "job_id": job_id,
-        "doc_id": doc_id,
-        "filename": file.filename,
+        "document_id": resolved_document_id,
+        "filename": safe_filename,
         "status": "submitted",
         "ingest_worker_response": resp.json(),
     }
@@ -81,8 +104,8 @@ def list_documents(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT doc_id, document_id, title, source_path, active_version,
-                       created_at, updated_at
+                SELECT document_id, title, source_path, original_filename,
+                       file_size, status, active_version, created_at, updated_at
                 FROM documents
                 WHERE tenant_id = %s
                 ORDER BY updated_at DESC
@@ -95,43 +118,50 @@ def list_documents(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
     return [dict(zip(cols, row)) for row in rows]
 
 
-@router.get("/{doc_id}")
-def get_document(doc_id: str) -> Dict[str, Any]:
-    """Get metadata for a single document by doc_id."""
+@router.get("/{document_id}")
+def get_document(document_id: str) -> Dict[str, Any]:
+    """Get metadata for a single document by document_id."""
+    if not _is_uuid(document_id):
+        raise HTTPException(status_code=400, detail="document_id must be a UUID")
+
     with _db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT doc_id, document_id, title, source_path, active_version,
+                SELECT document_id, title, source_path, original_filename,
+                       file_size, status, active_version,
                        content_sha256, created_at, updated_at
                 FROM documents
-                WHERE tenant_id = %s AND doc_id = %s
+                WHERE tenant_id = %s AND document_id = %s
                 LIMIT 1
                 """,
-                (settings.db.tenant_id, doc_id),
+                (settings.db.tenant_id, document_id),
             )
             row = cur.fetchone()
             if not row:
-                raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+                raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found")
             cols = [d[0] for d in cur.description]
     return dict(zip(cols, row))
 
 
-@router.delete("/{doc_id}")
-def delete_document(doc_id: str) -> Dict[str, Any]:
+@router.delete("/{document_id}")
+def delete_document(document_id: str) -> Dict[str, Any]:
     """
     Delete a document and all its chunks/ACL from PostgreSQL.
     Cascades via FK constraints.
     """
+    if not _is_uuid(document_id):
+        raise HTTPException(status_code=400, detail="document_id must be a UUID")
+
     with _db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM documents WHERE tenant_id = %s AND doc_id = %s RETURNING document_id",
-                (settings.db.tenant_id, doc_id),
+                "DELETE FROM documents WHERE tenant_id = %s AND document_id = %s RETURNING document_id",
+                (settings.db.tenant_id, document_id),
             )
             row = cur.fetchone()
             if not row:
-                raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+                raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found")
         conn.commit()
 
-    return {"ok": True, "doc_id": doc_id, "document_id": str(row[0])}
+    return {"ok": True, "document_id": str(row[0])}

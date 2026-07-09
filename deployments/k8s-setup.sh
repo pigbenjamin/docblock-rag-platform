@@ -43,19 +43,17 @@ kubectl create secret docker-registry pigbenjamin-ghcr-secret \
   --dry-run=client -o yaml | kubectl apply -f -
 echo "✅ imagePullSecret 完成"
 
-# ── 3. Apply manifests（照順序）──────────────────────────────
+# ── 3. Apply manifests（照順序；01-secrets.yaml / 02-configmap.yaml
+#       為唯一設定來源，手動維護，不進 git）───────────────────
 MANIFESTS=(
   01-secrets.yaml
   02-configmap.yaml
   03-pv-pvc.yaml
   03b-postgres.yaml
-  04-litellm-proxy.yaml
   06-ingest-worker.yaml
-  07-admin-api.yaml
+  07-document-api.yaml
   08-webhook-service.yaml
   09-retrieve-api.yaml
-  10-nostr-proxy.yaml
-  11-nostr-consumer.yaml
 )
 
 echo ""
@@ -73,9 +71,6 @@ done
 # ── 4. 等待並顯示狀態 ─────────────────────────────────────────
 echo ""
 echo ">>> Pod 狀態（等待啟動中...）"
-kubectl rollout status deployment/litellm-proxy  -n "${NAMESPACE}" --timeout=120s 2>/dev/null || true
-kubectl rollout status deployment/nostr-proxy    -n "${NAMESPACE}" --timeout=120s 2>/dev/null || true
-kubectl rollout status deployment/nostr-consumer -n "${NAMESPACE}" --timeout=120s 2>/dev/null || true
 kubectl rollout status deployment/retrieve-api   -n "${NAMESPACE}" --timeout=120s 2>/dev/null || true
 
 echo ""
@@ -87,9 +82,8 @@ echo "  Setup 完成"
 echo ""
 echo "  NodePort 對外 port："
 echo "    retrieve-api   → http://10.90.20.55:31761"
-echo "    admin-api      → http://10.90.20.55:31765"
+echo "    document-api   → http://10.90.20.55:31765"
 echo "    webhook-service → http://10.90.20.55:31763"
-echo "    nostr-proxy    → http://10.90.20.55:31800"
 echo ""
 echo "  查看 pod 狀態："
 echo "    kubectl get pods -n ${NAMESPACE}"

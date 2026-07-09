@@ -42,7 +42,7 @@ def _normalize_effect(effect: str) -> AccessLevel:
     return "deny"
 
 
-def split_doc_ids_by_access(access_map: Dict[str, AccessLevel]) -> Tuple[List[str], List[str]]:
+def split_document_ids_by_access(access_map: Dict[str, AccessLevel]) -> Tuple[List[str], List[str]]:
     detail = [d for d, a in access_map.items() if a == "detail"]
     summary = [d for d, a in access_map.items() if a == "summary"]
     return detail, summary
@@ -97,7 +97,7 @@ class ACLService:
         self,
         *,
         principals: Sequence[Principal],
-        candidate_doc_ids: Optional[Sequence[str]] = None,
+        candidate_document_ids: Optional[Sequence[str]] = None,
         limit: int = 10000,
     ) -> Dict[str, AccessLevel]:
         if not principals:
@@ -114,11 +114,11 @@ class ACLService:
         # tenant_id must come before cand to match SQL: WHERE d.tenant_id = %s {where_candidates}
         params.append(self.tenant_id)
 
-        if candidate_doc_ids is not None:
-            cand = [d for d in candidate_doc_ids if d]
+        if candidate_document_ids is not None:
+            cand = [d for d in candidate_document_ids if d]
             if not cand:
                 return {}
-            where_candidates = sql.SQL("AND d.doc_id = ANY(%s)")
+            where_candidates = sql.SQL("AND d.document_id = ANY(%s::uuid[])")
             params.append(cand)
 
         params.extend([limit, self.tenant_id])
@@ -129,16 +129,16 @@ WITH principals(principal_type, principal_id, priority) AS (
   VALUES {principals_values}
 ),
 candidates AS (
-  SELECT d.doc_id, d.document_id
+  SELECT d.document_id
   FROM documents d
   WHERE d.tenant_id = %s
   {where_candidates}
-  ORDER BY d.doc_id
+  ORDER BY d.document_id
   LIMIT %s
 ),
 matches AS (
   SELECT
-    c.doc_id,
+    c.document_id,
     a.effect,
     p.priority,
     CASE
@@ -156,16 +156,16 @@ matches AS (
    AND p.principal_id = a.principal_id
 ),
 best AS (
-  SELECT DISTINCT ON (m.doc_id)
-    m.doc_id,
+  SELECT DISTINCT ON (m.document_id)
+    m.document_id,
     m.effect
   FROM matches m
-  ORDER BY m.doc_id, m.priority DESC, m.effect_rank DESC
+  ORDER BY m.document_id, m.priority DESC, m.effect_rank DESC
 )
-SELECT c.doc_id, COALESCE(b.effect, 'deny') AS effect
+SELECT c.document_id, COALESCE(b.effect, 'deny') AS effect
 FROM candidates c
-LEFT JOIN best b ON b.doc_id = c.doc_id
-ORDER BY c.doc_id
+LEFT JOIN best b ON b.document_id = c.document_id
+ORDER BY c.document_id
 """
         ).format(
             principals_values=principals_values,
@@ -178,22 +178,22 @@ ORDER BY c.doc_id
                 rows = cur.fetchall()
 
         return {
-            str(doc_id): _normalize_effect(str(effect))
-            for doc_id, effect in rows
+            str(document_id): _normalize_effect(str(effect))
+            for document_id, effect in rows
         }
 
     def fetch_doc_access_for_user(
         self,
         *,
         user_id: str,
-        candidate_doc_ids: Optional[Sequence[str]] = None,
+        candidate_document_ids: Optional[Sequence[str]] = None,
         limit: int = 10000,
     ) -> Tuple[Dict[str, AccessLevel], List[Principal]]:
         principals = self.fetch_user_principals(user_id)
 
         access_map = self.fetch_doc_access_map(
             principals=principals,
-            candidate_doc_ids=candidate_doc_ids,
+            candidate_document_ids=candidate_document_ids,
             limit=limit,
         )
 
@@ -235,44 +235,33 @@ ORDER BY c.doc_id
         overall_success = True
 
         try:
-            # Resolve canonical document_id if caller passed a doc_id
+            db_document_id = str(document_id)
+
+            if not is_uuid(db_document_id):
+                return {
+                    "success": False,
+                    "results": [],
+                    "errors": [
+                        {
+                            "principal": None,
+                            "error": f"document_id must be a UUID: {document_id!r}",
+                        }
+                    ],
+                }
+
             with conn, conn.cursor() as cur:
-                db_document_id = str(document_id)
+                if not sql_utils.document_exists(cur, self.tenant_id, db_document_id):
+                    return {
+                        "success": False,
+                        "results": [],
+                        "errors": [
+                            {
+                                "principal": None,
+                                "error": f"document not found (document_id): {document_id}",
+                            }
+                        ],
+                    }
 
-                if not is_uuid(db_document_id):
-                    resolved = sql_utils.fetch_document_id_by_docid(
-                        cur,
-                        self.tenant_id,
-                        db_document_id,
-                    )
-
-                    if not resolved:
-                        return {
-                            "success": False,
-                            "results": [],
-                            "errors": [
-                                {
-                                    "principal": None,
-                                    "error": f"document not found (doc_id): {document_id}",
-                                }
-                            ],
-                        }
-
-                    db_document_id = resolved
-                else:
-                    # UUID format: verify it actually exists in documents
-                    if not sql_utils.document_exists(cur, self.tenant_id, db_document_id):
-                        return {
-                            "success": False,
-                            "results": [],
-                            "errors": [
-                                {
-                                    "principal": None,
-                                    "error": f"document not found (document_id): {document_id}",
-                                }
-                            ],
-                        }
-                    
             # Process each principal
             _VALID_EFFECTS = {"detail", "summary", "deny"}
 
@@ -353,36 +342,26 @@ ORDER BY c.doc_id
         }
         """
         ptype, pid = principal
+        db_document_id = str(document_id)
+
+        if not is_uuid(db_document_id):
+            return {
+                "success": False,
+                "found_document": False,
+                "deleted": 0,
+                "reason": f"document_id must be a UUID: {document_id!r}",
+            }
 
         conn = psycopg2.connect(self.pg_dsn)
         try:
             with conn, conn.cursor() as cur:
-                db_document_id = str(document_id)
-
-                if not is_uuid(db_document_id):
-                    resolved = sql_utils.fetch_document_id_by_docid(
-                        cur,
-                        self.tenant_id,
-                        db_document_id,
-                    )
-
-                    if not resolved:
-                        return {
-                            "success": False,
-                            "found_document": False,
-                            "deleted": 0,
-                            "reason": f"document not found (doc_id): {document_id}",
-                        }
-
-                    db_document_id = resolved
-                else:
-                    if not sql_utils.document_exists(cur, self.tenant_id, db_document_id):
-                        return {
-                            "success": False,
-                            "found_document": False,
-                            "deleted": 0,
-                            "reason": f"document not found (document_id): {document_id}",
-                        }
+                if not sql_utils.document_exists(cur, self.tenant_id, db_document_id):
+                    return {
+                        "success": False,
+                        "found_document": False,
+                        "deleted": 0,
+                        "reason": f"document not found (document_id): {document_id}",
+                    }
 
                 deleted = sql_utils.delete_document_acl(
                     cur,
@@ -416,17 +395,17 @@ def fetch_doc_access_for_user(
     pg_dsn: str,
     tenant_id: str,
     user_id: str,
-    candidate_doc_ids: Optional[Sequence[str]] = None,
+    candidate_document_ids: Optional[Sequence[str]] = None,
     limit: int = 10000,
 ) -> Tuple[Dict[str, AccessLevel], List[Principal]]:
     """Module-level convenience wrapper around ACLService.fetch_doc_access_for_user.
 
-    Returns (access_map, principals).
+    Returns (access_map, principals). access_map is keyed by document_id (UUID string).
     """
     svc = ACLService(pg_dsn=pg_dsn, tenant_id=tenant_id)
     return svc.fetch_doc_access_for_user(
         user_id=user_id,
-        candidate_doc_ids=candidate_doc_ids,
+        candidate_document_ids=candidate_document_ids,
         limit=limit,
     )
 
@@ -440,10 +419,10 @@ acl = ACLService(
 
 access_map, principals = acl.fetch_doc_access_for_user(
     user_id="001",
-    candidate_doc_ids=["doc_001", "doc_002"],
+    candidate_document_ids=["fdf8c0ed-0f19-42ae-8d58-c04969610365"],
 )
 
-detail_doc_ids, summary_doc_ids = split_doc_ids_by_access(access_map)
+detail_ids, summary_ids = split_document_ids_by_access(access_map)
 """
 
 # 寫入文件權限
@@ -454,7 +433,7 @@ acl = ACLService(
     tenant_id=settings.db.tenant_id,
 )
 result = acl.write_access(
-    document_id="doc_001",
+    document_id="fdf8c0ed-0f19-42ae-8d58-c04969610365",
     access_map={
         ("department", "A"): "detail",
         ("department", "B"): "summary",

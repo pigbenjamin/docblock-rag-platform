@@ -1,7 +1,7 @@
 """
 Tests for worker/tasks/marker_to_md.py.
 
-Mocks httpx.Client so no real LiteLLM proxy or marker-service is needed.
+Mocks httpx.Client so no real LiteLLM connection is needed.
 """
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ def test_run_marker_to_md_payload_structure():
 
     content = json.loads(sent_json["messages"][0]["content"])
     assert content["pdf_path"] == "/data/x.pdf"
-    assert content["doc_id"] == "my-doc"
+    assert content["document_id"] == "my-doc"
     assert content["out_dir"] == "/data/work"
     assert content["job_id"] == "job-99"
 

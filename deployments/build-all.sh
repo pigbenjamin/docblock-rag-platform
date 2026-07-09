@@ -19,22 +19,12 @@ NO_CACHE=""
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Services that do NOT depend on docblock-core
-LIGHT_SERVICES=(
-  nostr-proxy
-  nostr-consumer
-  marker-service
-)
-
-# Services that DO depend on docblock-core
-CORE_SERVICES=(
+ALL_SERVICES=(
   retrieve-api
-  admin-api
+  document-api
   ingest-worker
   webhook-service
 )
-
-ALL_SERVICES=("${LIGHT_SERVICES[@]}" "${CORE_SERVICES[@]}")
 
 echo "================================================"
 echo "  Build All Services"

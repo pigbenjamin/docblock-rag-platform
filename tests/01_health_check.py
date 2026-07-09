@@ -12,11 +12,10 @@ header("01  Health Check")
 checks = [
     (RETRIEVE_API,    "/healthz",  "retrieve-api    /healthz"),
     (RETRIEVE_API,    "/readyz",   "retrieve-api    /readyz"),
-    (ADMIN_API,       "/healthz",  "admin-api       /healthz"),
+    (DOCUMENT_API,    "/healthz",  "document-api    /healthz"),
     (INGEST_WORKER,   "/healthz",  "ingest-worker   /healthz"),
     (WEBHOOK_SERVICE, "/healthz",  "webhook-service /healthz"),
-    (LITELLM_PROXY,   "/health/liveliness", "marker/litellm  health"),
-    (NOSTR_PROXY,     "/health",   "nostr-proxy     /health"),
+    (LITELLM_PROXY,   "/health/liveliness", "litellm         health"),
 ]
 
 for base, path, label in checks:

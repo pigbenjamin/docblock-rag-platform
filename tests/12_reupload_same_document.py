@@ -1,10 +1,10 @@
 """
-12 Re-upload Same doc_id
-驗證相同 doc_id 重複上傳的行為：
+12 Re-upload Same document_id
+驗證重新上傳同一 document_id（新版本）的行為：
 
   場景 A：相同內容（SHA-256 不變）
     - version 不應遞增（short-circuit，跳過 embedding）
-    - document_id UUID 不應改變
+    - document_id 不應改變
     - chunk 數不重複
 
   場景 B：內容變更（動態產生最小 PDF）
@@ -18,14 +18,11 @@ import requests
 from pathlib import Path
 from config import *
 
-header("12  Re-upload Same doc_id")
+header("12  Re-upload Same document_id")
 
 if not os.path.exists(TEST_PDF):
     fail(f"測試 PDF 不存在：{TEST_PDF}")
     summary()
-
-DOC_ID = f"reupload-test-{uuid.uuid4().hex[:8]}"
-info(f"使用 doc_id={DOC_ID!r}")
 
 ACL_HEADERS = {"X-Acl-Secret": ACL_ADMIN_SECRET, "Content-Type": "application/json"}
 
@@ -76,55 +73,69 @@ def _make_synthetic_pdf(path: str, label: str) -> None:
 
 
 # ── 輔助：上傳並等待完成 ─────────────────────────────────────────
-def upload_and_wait(doc_id, pdf_path, title, max_wait=300):
-    """上傳 PDF 並輪詢至 done / failed。回傳 (job_id, elapsed_sec)；失敗回傳 (None, elapsed)。"""
+def upload_and_wait(pdf_path, title, document_id=None, max_wait=300):
+    """上傳 PDF 並輪詢至 done / failed。
+    document_id=None → 建立新文件；傳入既有 document_id → 該文件的新版本。
+    回傳 (document_id, job_id, elapsed_sec)；失敗回傳 (None, None, elapsed)。
+    """
+    data = {"title": title}
+    if document_id:
+        data["document_id"] = document_id
+
     with open(pdf_path, "rb") as f:
         r = requests.post(
-            f"{ADMIN_API}/v1/documents/upload",
+            f"{DOCUMENT_API}/v1/documents/upload",
             files={"file": (os.path.basename(pdf_path), f, "application/pdf")},
-            data={"doc_id": doc_id, "title": title},
+            data=data,
             timeout=30,
         )
     if r.status_code != 200:
         fail(f"upload → HTTP {r.status_code}  body={r.text[:200]}")
-        return None, 0
+        return None, None, 0
 
     body = r.json()
     job_id = body.get("job_id")
-    if not job_id:
-        fail(f"upload 回應缺少 job_id：{body}")
-        return None, 0
+    resolved_document_id = body.get("document_id")
+    if not job_id or not resolved_document_id:
+        fail(f"upload 回應缺少 job_id/document_id：{body}")
+        return None, None, 0
 
     elapsed = 0
     while elapsed < max_wait:
-        rj = requests.get(f"{ADMIN_API}/v1/documents/job/{job_id}", timeout=10)
+        rj = requests.get(f"{DOCUMENT_API}/v1/documents/job/{job_id}", timeout=10)
         j = rj.json()
         status = j.get("status")
         if status == "done":
-            return job_id, elapsed
+            return resolved_document_id, job_id, elapsed
         elif status == "failed":
             fail(f"Pipeline 失敗：{j.get('detail', '')[:200]}")
-            return None, elapsed
+            return None, None, elapsed
         info(f"  [{elapsed:>3}s] {status}")
         time.sleep(5)
         elapsed += 5
 
     fail(f"Pipeline 超時（>{max_wait}s）")
-    return None, elapsed
+    return None, None, elapsed
 
 
-def get_doc_meta(doc_id):
-    r = requests.get(f"{ADMIN_API}/v1/documents/{doc_id}", timeout=10)
+def get_doc_meta(document_id):
+    r = requests.get(f"{DOCUMENT_API}/v1/documents/{document_id}", timeout=10)
     if r.status_code != 200:
-        fail(f"GET /v1/documents/{doc_id} → HTTP {r.status_code}")
+        fail(f"GET /v1/documents/{document_id} → HTTP {r.status_code}")
         return None
     return r.json()
 
 
-def open_search_hits(doc_id_filter):
+def search_hits(document_id):
+    """以 u001 身分搜尋指定文件（ACL 已於場景 A-1 寫入，document_id 跨版本不變）。"""
     r = requests.post(
-        f"{RETRIEVE_API}/v1/search/open",
-        json={"query": "policy network document", "doc_ids": [doc_id_filter], "top_k": 100},
+        f"{RETRIEVE_API}/v1/search",
+        json={
+            "query": "policy network document",
+            "user_id": USERS["u001"],
+            "document_ids": [document_id],
+            "top_k": 100,
+        },
         timeout=SEARCH_TIMEOUT,
     )
     if r.status_code != 200:
@@ -133,29 +144,28 @@ def open_search_hits(doc_id_filter):
 
 
 # ════════════════════════════════════════════════════════════════
-# 場景 A-1：初次上傳
+# 場景 A-1：初次上傳（不指定 document_id，由伺服器生成）
 # ════════════════════════════════════════════════════════════════
 info("─ 場景 A-1：初次上傳（test.pdf）")
-job_id_1, t1 = upload_and_wait(DOC_ID, TEST_PDF, "Reupload Test - First Upload")
+did1, job_id_1, t1 = upload_and_wait(TEST_PDF, "Reupload Test - First Upload")
 
 if not job_id_1:
     summary()
 
-ok(f"初次上傳完成（耗時 ~{t1}s）")
+ok(f"初次上傳完成（耗時 ~{t1}s）  document_id={did1}")
 
-meta1 = get_doc_meta(DOC_ID)
+meta1 = get_doc_meta(did1)
 if not meta1:
     summary()
 
-v1   = meta1["active_version"]
-did1 = meta1["document_id"]
+v1  = meta1["active_version"]
 sha1 = meta1.get("content_sha256", "?")
 ok(f"初次 → version={v1}  document_id={did1}")
 info(f"content_sha256={sha1[:16]}…")
 
-# 設 ACL 讓 open search 可搜尋
+# 設 ACL 讓 search 可搜尋
 requests.post(
-    f"{ADMIN_API}/v1/acl/write-map",
+    f"{DOCUMENT_API}/v1/acl/write-map",
     headers=ACL_HEADERS,
     json={
         "document_id": did1,
@@ -164,42 +174,43 @@ requests.post(
     timeout=10,
 )
 
-hits_v1 = open_search_hits(DOC_ID)
-info(f"初次上傳後 open search hits={hits_v1}")
+hits_v1 = search_hits(did1)
+info(f"初次上傳後搜尋 hits={hits_v1}")
 
 
 # ════════════════════════════════════════════════════════════════
-# 場景 A-2：相同內容重複上傳（預期 short-circuit）
+# 場景 A-2：相同內容、帶原 document_id 重新上傳（預期 short-circuit）
 # ════════════════════════════════════════════════════════════════
-info("─ 場景 A-2：相同內容重複上傳（預期 version 不遞增）")
-job_id_2, t2 = upload_and_wait(DOC_ID, TEST_PDF, "Reupload Test - Second Upload (same content)")
+info("─ 場景 A-2：相同內容、帶原 document_id 重新上傳（預期 version 不遞增）")
+did2, job_id_2, t2 = upload_and_wait(
+    TEST_PDF, "Reupload Test - Second Upload (same content)", document_id=did1
+)
 
 if job_id_2:
     ok(f"重複上傳完成（耗時 ~{t2}s）")
 
-    meta2 = get_doc_meta(DOC_ID)
+    meta2 = get_doc_meta(did1)
     if meta2:
         v2   = meta2["active_version"]
-        did2 = meta2["document_id"]
         sha2 = meta2.get("content_sha256", "?")
-
-        if v2 == v1:
-            ok(f"version 未遞增（short-circuit 生效）：version={v2}")
-        else:
-            fail(f"version 不應遞增：初次={v1}，重複後={v2}")
 
         if did2 == did1:
             ok(f"document_id 維持不變：{did2}")
         else:
             fail(f"document_id 改變：{did1} → {did2}")
 
+        if v2 == v1:
+            ok(f"version 未遞增（short-circuit 生效）：version={v2}")
+        else:
+            fail(f"version 不應遞增：初次={v1}，重複後={v2}")
+
         if sha2 == sha1:
             ok(f"content_sha256 不變（正確）")
         else:
             fail(f"content_sha256 改變（不應改變）：{sha1[:16]}… → {sha2[:16]}…")
 
-        hits_v1b = open_search_hits(DOC_ID)
-        info(f"重複上傳後 open search hits={hits_v1b}")
+        hits_v1b = search_hits(did1)
+        info(f"重複上傳後搜尋 hits={hits_v1b}")
         if hits_v1 is not None and hits_v1b is not None:
             if hits_v1b == hits_v1:
                 ok(f"chunk 數未重複（{hits_v1b} hits）")
@@ -213,27 +224,33 @@ if job_id_2:
 
 
 # ════════════════════════════════════════════════════════════════
-# 場景 B：內容變更（動態產生最小 PDF）
+# 場景 B：內容變更、帶原 document_id 上傳（動態產生最小 PDF）
 # ════════════════════════════════════════════════════════════════
-info("─ 場景 B：內容變更上傳（動態最小 PDF）")
+info("─ 場景 B：內容變更、帶原 document_id 上傳（動態最小 PDF）")
 
 _tmp_pdf = tempfile.mktemp(suffix=".pdf")
 _make_synthetic_pdf(_tmp_pdf, label="modified-v2")
 info(f"已產生合成 PDF：{_tmp_pdf}")
 
 try:
-    job_id_b, tb = upload_and_wait(DOC_ID, _tmp_pdf, "Reupload Test - Content Changed (synthetic)")
+    did_b, job_id_b, tb = upload_and_wait(
+        _tmp_pdf, "Reupload Test - Content Changed (synthetic)", document_id=did1
+    )
 
     if job_id_b is None:
         info("場景 B pipeline 失敗（可能合成 PDF 不被 marker 支援），略過後續驗證")
     else:
         ok(f"內容變更上傳完成（耗時 ~{tb}s）")
 
-        meta_b = get_doc_meta(DOC_ID)
+        meta_b = get_doc_meta(did1)
         if meta_b:
             vb    = meta_b["active_version"]
-            did_b = meta_b["document_id"]
             sha_b = meta_b.get("content_sha256", "?")
+
+            if did_b == did1:
+                ok(f"document_id 維持不變：{did_b}")
+            else:
+                fail(f"document_id 改變：{did1} → {did_b}")
 
             expected_v = v1 + 1
             if vb == expected_v:
@@ -241,18 +258,13 @@ try:
             else:
                 fail(f"version 應為 {expected_v}，got {vb}（sha256 可能相同導致未遞增）")
 
-            if did_b == did1:
-                ok(f"document_id 維持不變：{did_b}")
-            else:
-                fail(f"document_id 改變：{did1} → {did_b}")
-
             if sha_b != sha1:
                 ok(f"content_sha256 已更新（內容不同）")
             else:
                 info(f"content_sha256 未改變（合成 PDF 可能產生相同 markdown，version 不會遞增）")
 
-            hits_vb = open_search_hits(DOC_ID)
-            info(f"內容變更後 open search hits={hits_vb}")
+            hits_vb = search_hits(did1)
+            info(f"內容變更後搜尋 hits={hits_vb}")
             if hits_v1 is not None and hits_vb is not None and vb == expected_v:
                 if hits_vb < hits_v1:
                     ok(

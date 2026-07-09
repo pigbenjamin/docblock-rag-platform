@@ -10,7 +10,7 @@ class DBSettings:
 
 @dataclass
 class AclSettings:
-    admin_secret: str = os.getenv("ACL_ADMIN_SECRET", "acl-admin-secret-changeme")
+    admin_secret: str = os.getenv("ACL_ADMIN_SECRET", "")
 
 
 @dataclass

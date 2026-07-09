@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Literal
 import psycopg2
 import psycopg2.extras
 import requests
+from docblock_core.llm_http import litellm_headers
 
 import urllib3
 from urllib3.exceptions import InsecureRequestWarning
@@ -46,8 +47,7 @@ AccessLevel = Literal["detail", "summary", "deny"]
 @dataclass
 class SearchHit:
     source: SourceType
-    doc_id: str
-    document_id: str  # UUID string
+    document_id: str  # UUID string, the sole document identifier
     chunk_index: int  # for summary hits, we use 0
     score: float  # higher is better
     content: str
@@ -186,7 +186,7 @@ class DocblockSearchClient:
     Multi-tenant, ACL-aware search client (detail/summary/deny).
 
     Key points:
-    - Uses documents.(tenant_id, doc_id) to resolve document_id(UUID) and active_version
+    - documents.document_id (UUID) is the sole identifier; documents.active_version tracks the current version
     - For "detail" docs: searches text_chunks / table_chunks / image_chunks (version=active_version)
     - For "summary" docs: searches summary_chunks only
     """
@@ -226,7 +226,8 @@ class DocblockSearchClient:
         url = f"{self.litellm_base_url.rstrip('/')}/v1/embeddings"
         r = requests.post(
             url,
-            json={"model": self.embed_model, "input": query},
+            json={"model": self.embed_model, "input": settings.models.embed_query_prefix + query},
+            headers=litellm_headers(),
             timeout=self.embed_timeout,
         )
         r.raise_for_status()
@@ -258,7 +259,7 @@ class DocblockSearchClient:
             or ""
         )
         source = hit.source or ""
-        doc_id = hit.document_id or hit.doc_id or ""
+        document_id = hit.document_id or ""
         chunk_index = hit.chunk_index
 
         parts = []
@@ -268,8 +269,8 @@ class DocblockSearchClient:
             parts.append(f"Section: {section}")
         if source:
             parts.append(f"Source: {source}")
-        if doc_id:
-            parts.append(f"Document ID: {doc_id}")
+        if document_id:
+            parts.append(f"Document ID: {document_id}")
         if chunk_index is not None:
             parts.append(f"Chunk Index: {chunk_index}")
 
@@ -290,7 +291,7 @@ class DocblockSearchClient:
         query: str,
         hits: List["SearchHit"],
         top_n: Optional[int] = None,
-        reranker_model: str = "qwen3:8b",
+        reranker_model: str = settings.models.rerank_model,
         litellm_base_url: Optional[str] = None,
         timeout: int = 120,
         max_passage_chars: int = 1800,
@@ -347,7 +348,7 @@ class DocblockSearchClient:
             }
 
             url = f"{_base_url}/v1/chat/completions"
-            resp = requests.post(url, json=payload, timeout=timeout)
+            resp = requests.post(url, json=payload, headers=litellm_headers(), timeout=timeout)
             resp.raise_for_status()
             data = resp.json()
 
@@ -388,7 +389,6 @@ class DocblockSearchClient:
             reranked.append(
                 SearchHit(
                     source=hit.source,
-                    doc_id=hit.doc_id,
                     document_id=hit.document_id,
                     chunk_index=hit.chunk_index,
                     score=float(rerank_score),   # 最終排序用 rerank score
@@ -476,10 +476,9 @@ class DocblockSearchClient:
             reranked.append(
                 SearchHit(
                     source=hit.source,
-                    doc_id=hit.doc_id,
                     document_id=hit.document_id,
                     chunk_index=hit.chunk_index,
-                    score=score, 
+                    score=score,
                     content=hit.content,
                     metadata=meta,
                 )
@@ -494,7 +493,7 @@ class DocblockSearchClient:
     
     
     # ---------------------------
-    # HTTP Reranking (via proxy → Nostr → LiteLLM)
+    # HTTP Reranking (direct LiteLLM)
     # ---------------------------
     def rerank_hits_http(
         self,
@@ -508,8 +507,7 @@ class DocblockSearchClient:
     ) -> List["SearchHit"]:
         """
         Rerank via POST {base_url}/v1/rerank (OpenAI format).
-        base_url = OLLAMA_BASE_URL, which points to nostr-proxy.
-        nostr-proxy routes the request as Kind 2001 → LiteLLM → vLLM reranker.
+        base_url = LITELLM_BASE_URL (direct LiteLLM endpoint).
         Falls back to original ordering on any error.
         """
         if not hits:
@@ -522,7 +520,7 @@ class DocblockSearchClient:
         payload = {"model": reranker_model, "query": query, "documents": documents}
 
         try:
-            resp = requests.post(url, json=payload, timeout=timeout)
+            resp = requests.post(url, json=payload, headers=litellm_headers(), timeout=timeout)
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
@@ -543,7 +541,6 @@ class DocblockSearchClient:
             reranked.append(
                 SearchHit(
                     source=hit.source,
-                    doc_id=hit.doc_id,
                     document_id=hit.document_id,
                     chunk_index=hit.chunk_index,
                     score=score,
@@ -560,7 +557,7 @@ class DocblockSearchClient:
     # ---------------------------
     # Routing
     # ---------------------------
-    def route_profile(self, query: str, *, router_model: str = "qwen3.5-9b", timeout: int = 30) -> str:
+    def route_profile(self, query: str, *, router_model: str = settings.models.chat_model, timeout: int = 30) -> str:
         url = f"{self.litellm_base_url.rstrip('/')}/v1/chat/completions"
         payload = {
             "model": router_model,
@@ -571,7 +568,7 @@ class DocblockSearchClient:
             "stream": False,
         }
         try:
-            r = requests.post(url, json=payload, timeout=timeout)
+            r = requests.post(url, json=payload, headers=litellm_headers(), timeout=timeout)
             r.raise_for_status()
             data = r.json()
             content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
@@ -586,20 +583,20 @@ class DocblockSearchClient:
         self,
         *,
         tenant_id: str,
-        doc_ids: List[str],
+        document_ids: List[str],
         query: str,
         n: int = 100,
     ) -> List[str]:
         """
         Routing: use FTS over text_chunks.content to pick Top-N candidate docs.
-        Returns: list of doc_id (external id, i.e., documents.doc_id).
+        Returns: list of document_id (UUID strings).
         """
-        if not doc_ids:
+        if not document_ids:
             return []
 
         sql = """
         SELECT
-          d.doc_id,
+          d.document_id::text AS document_id,
           MAX(
             ts_rank(
               to_tsvector('simple', COALESCE(tc.content,'')),
@@ -612,19 +609,19 @@ class DocblockSearchClient:
          AND tc.document_id = d.document_id
          AND tc.version = d.active_version
         WHERE d.tenant_id = %(tenant_id)s
-          AND d.doc_id = ANY(%(doc_ids)s::text[])
+          AND d.document_id = ANY(%(document_ids)s::uuid[])
           AND plainto_tsquery('simple', %(q)s) @@ to_tsvector('simple', COALESCE(tc.content,''))
-        GROUP BY d.doc_id
+        GROUP BY d.document_id
         ORDER BY score DESC
         LIMIT %(n)s
         """
 
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_ids": doc_ids, "q": query, "n": n})
+            cur.execute(sql, {"tenant_id": tenant_id, "document_ids": document_ids, "q": query, "n": n})
             rows = cur.fetchall()
 
-        # 只回 doc_id；如果你想 debug，也可以把 score 一起回傳
-        return [r["doc_id"] for r in rows if r.get("doc_id")]
+        # 只回 document_id；如果你想 debug，也可以把 score 一起回傳
+        return [r["document_id"] for r in rows if r.get("document_id")]
 
     # ---------------------------
     # DB helpers
@@ -632,53 +629,38 @@ class DocblockSearchClient:
     def _conn(self):
         return psycopg2.connect(self.pg_dsn)
 
-    def _resolve_doc(self, *, tenant_id: str, doc_id: str) -> Tuple[str, int]:
-        """
-        Resolve (document_id, active_version) by (tenant_id, doc_id).
-        """
-        sql = """
-        SELECT document_id::text AS document_id, active_version
-        FROM documents
-        WHERE tenant_id = %(tenant_id)s AND doc_id = %(doc_id)s
-        """
-        with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_id": doc_id})
-            row = cur.fetchone()
-        if not row:
-            raise ValueError(f"Unknown doc_id '{doc_id}' for tenant_id='{tenant_id}'")
-        return str(row["document_id"]), int(row["active_version"])
-    
-    # get hit url
-    def _get_hit_url(self, doc_id: str) -> str:
+    # get hit url (Outline integration is opt-in: only documents with an
+    # explicit external_ref, e.g. an Outline document id, resolve to a URL)
+    def _get_hit_url(self, external_ref: Optional[str]) -> str:
         outline_api_token = settings.outline.api_token
         outline_url = settings.outline.outline_url
 
-        if not doc_id:
+        if not external_ref:
             return ""
         if not outline_api_token or not outline_url:
             #logger.warning("[_get_hit_url] missing outline settings")
             return ""
-        
+
         outline_session = requests.Session()
         outline_session.verify = False
         urllib3.disable_warnings(InsecureRequestWarning)
         outline_session.headers.update({"Authorization": f"Bearer {outline_api_token}"})
-        #logger.info("[_get_hit_url] fetching doc info from outline for doc_id=%s", doc_id)
+        #logger.info("[_get_hit_url] fetching doc info from outline for external_ref=%s", external_ref)
         try:
             r = outline_session.post(
                 f"{outline_url}/api/documents.info",
-                json={"id": doc_id},
+                json={"id": external_ref},
                 timeout=10,
             )
 
             if r.status_code == 404:
-                #logger.warning("[_get_hit_url] doc_id not found in outline: %s", doc_id)
+                #logger.warning("[_get_hit_url] external_ref not found in outline: %s", external_ref)
                 return ""
-            
+
             r.raise_for_status()
             doc_info = r.json().get("data") or {}
             url_path = doc_info.get("url")
-            #logger.info("[_get_hit_url] got doc info from outline for doc_id=%s url_path=%s", doc_id, url_path)
+            #logger.info("[_get_hit_url] got doc info from outline for external_ref=%s url_path=%s", external_ref, url_path)
             if not url_path:
                 return ""
             if isinstance(url_path, str) and (url_path.startswith("http://") or url_path.startswith("https://")):
@@ -686,10 +668,10 @@ class DocblockSearchClient:
             return f"{outline_url}{url_path}"
 
         except requests.RequestException as e:
-            #logger.warning("[_get_hit_url] outline request failed for doc_id=%s error=%s", doc_id, str(e))
+            #logger.warning("[_get_hit_url] outline request failed for external_ref=%s error=%s", external_ref, str(e))
             return ""
         except (ValueError, TypeError) as e:
-            #logger.warning("[_get_hit_url] invalid outline response for doc_id=%s error=%s", doc_id, str(e))
+            #logger.warning("[_get_hit_url] invalid outline response for external_ref=%s error=%s", external_ref, str(e))
             return ""
 
     # ---------------------------
@@ -699,7 +681,7 @@ class DocblockSearchClient:
         self,
         *,
         tenant_id: str,
-        doc_ids: List[str],
+        document_ids: List[str],
         qvec: List[float],
         k: int = 200,
     ) -> List[SearchHit]:
@@ -707,14 +689,13 @@ class DocblockSearchClient:
         Dense search across multiple docs in a single query (text_chunks).
         Returns chunk-level SearchHit (source='text') with RAW dense score.
         """
-        if not doc_ids:
+        if not document_ids:
             return []
 
         qv = _to_pg_vector_literal(qvec)
 
         sql = """
         SELECT
-          d.doc_id,
           tc.document_id::text AS document_id,
           tc.chunk_index,
           tc.page_start,
@@ -729,14 +710,14 @@ class DocblockSearchClient:
          AND tc.document_id = d.document_id
          AND tc.version = d.active_version
         WHERE d.tenant_id = %(tenant_id)s
-          AND d.doc_id = ANY(%(doc_ids)s::text[])
+          AND d.document_id = ANY(%(document_ids)s::uuid[])
           AND tc.embedding IS NOT NULL
         ORDER BY tc.embedding <=> %(qvec)s::vector
         LIMIT %(k)s
         """
 
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_ids": doc_ids, "qvec": qv, "k": k})
+            cur.execute(sql, {"tenant_id": tenant_id, "document_ids": document_ids, "qvec": qv, "k": k})
             rows = cur.fetchall()
 
         hits: List[SearchHit] = []
@@ -749,9 +730,7 @@ class DocblockSearchClient:
             hits.append(
                 SearchHit(
                     source="text",
-                    doc_id=r["doc_id"],
                     document_id=r["document_id"],
-                    #doc_url=self._get_hit_url(doc_id=r["doc_id"]),
                     chunk_index=int(r["chunk_index"]),
                     score=float(r["score"]) if r["score"] is not None else 0.0,
                     content=r["content"] or "",
@@ -764,18 +743,17 @@ class DocblockSearchClient:
         self,
         *,
         tenant_id: str,
-        doc_ids: List[str],
+        document_ids: List[str],
         qvec: List[float],
         k: int = 200,
     ) -> List[SearchHit]:
-        if not doc_ids:
+        if not document_ids:
             return []
 
         qv = _to_pg_vector_literal(qvec)
 
         sql = """
         SELECT
-        d.doc_id,
         tb.document_id::text AS document_id,
         tb.chunk_index,
         tb.page_start,
@@ -790,14 +768,14 @@ class DocblockSearchClient:
         ON tb.document_id = d.document_id
         AND tb.version = d.active_version
         WHERE d.tenant_id = %(tenant_id)s
-        AND d.doc_id = ANY(%(doc_ids)s::text[])
+        AND d.document_id = ANY(%(document_ids)s::uuid[])
         AND tb.embedding IS NOT NULL
         ORDER BY tb.embedding <=> %(qvec)s::vector
         LIMIT %(k)s
         """
 
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_ids": doc_ids, "qvec": qv, "k": k})
+            cur.execute(sql, {"tenant_id": tenant_id, "document_ids": document_ids, "qvec": qv, "k": k})
             rows = cur.fetchall()
 
         hits: List[SearchHit] = []
@@ -811,9 +789,7 @@ class DocblockSearchClient:
             hits.append(
                 SearchHit(
                     source="table_dense",
-                    doc_id=r["doc_id"],
                     document_id=r["document_id"],
-                    #doc_url=self._get_hit_url(doc_id=r["doc_id"]),
                     chunk_index=int(r["chunk_index"]),
                     score=float(r["score"]) if r["score"] is not None else 0.0,
                     content=r.get("raw_table_md") or "",
@@ -821,16 +797,16 @@ class DocblockSearchClient:
                 )
             )
         return hits
-    
+
     def search_table_lexical_multi(
         self,
         *,
         tenant_id: str,
-        doc_ids: List[str],
+        document_ids: List[str],
         query: str,
         k: int = 200,
     ) -> List[SearchHit]:
-        if not doc_ids:
+        if not document_ids:
             return []
 
         sql = """
@@ -838,7 +814,6 @@ class DocblockSearchClient:
         SELECT plainto_tsquery('simple', %(q)s) AS tsq
         )
         SELECT
-        d.doc_id,
         tb.document_id::text AS document_id,
         tb.chunk_index,
         tb.page_start,
@@ -854,14 +829,14 @@ class DocblockSearchClient:
         AND tb.version = d.active_version
         JOIN q ON TRUE
         WHERE d.tenant_id = %(tenant_id)s
-        AND d.doc_id = ANY(%(doc_ids)s::text[])
+        AND d.document_id = ANY(%(document_ids)s::uuid[])
         AND tb.tsv @@ q.tsq
         ORDER BY score DESC
         LIMIT %(k)s
         """
 
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_ids": doc_ids, "q": query, "k": k})
+            cur.execute(sql, {"tenant_id": tenant_id, "document_ids": document_ids, "q": query, "k": k})
             rows = cur.fetchall()
 
         hits: List[SearchHit] = []
@@ -875,9 +850,7 @@ class DocblockSearchClient:
             hits.append(
                 SearchHit(
                     source="table_lex",
-                    doc_id=r["doc_id"],
                     document_id=r["document_id"],
-                    #doc_url=self._get_hit_url(doc_id=r["doc_id"]),
                     chunk_index=int(r["chunk_index"]),
                     score=float(r["score"]) if r["score"] is not None else 0.0,
                     content=r.get("raw_table_md") or "",
@@ -890,18 +863,17 @@ class DocblockSearchClient:
         self,
         *,
         tenant_id: str,
-        doc_ids: List[str],
+        document_ids: List[str],
         qvec: List[float],
         k: int = 200,
     ) -> List[SearchHit]:
-        if not doc_ids:
+        if not document_ids:
             return []
 
         qv = _to_pg_vector_literal(qvec)
 
         sql = """
         SELECT
-        d.doc_id,
         im.document_id::text AS document_id,
         im.chunk_index,
         im.page_start,
@@ -917,7 +889,7 @@ class DocblockSearchClient:
         ON im.document_id = d.document_id
         AND im.version = d.active_version
         WHERE d.tenant_id = %(tenant_id)s
-        AND d.doc_id = ANY(%(doc_ids)s::text[])
+        AND d.document_id = ANY(%(document_ids)s::uuid[])
         AND im.text_embedding IS NOT NULL
         ORDER BY im.text_embedding <=> %(qvec)s::vector
         LIMIT %(k)s
@@ -928,7 +900,7 @@ class DocblockSearchClient:
                 sql,
                 {
                     "tenant_id": tenant_id,
-                    "doc_ids": doc_ids,
+                    "document_ids": document_ids,
                     "qvec": qv,
                     "k": k,
                 },
@@ -947,9 +919,7 @@ class DocblockSearchClient:
             hits.append(
                 SearchHit(
                     source="image_text",
-                    doc_id=r["doc_id"],
                     document_id=r["document_id"],
-                    #doc_url=self._get_hit_url(doc_id=r["doc_id"]),
                     chunk_index=int(r["chunk_index"]),
                     score=float(r["score"]) if r["score"] is not None else 0.0,
                     content=r.get("image_caption") or r.get("image_alt") or "",
@@ -961,11 +931,10 @@ class DocblockSearchClient:
     # ---------------------------
     # Low-level searches (DETAIL)
     # ---------------------------
-    def search_text_dense(self, *, tenant_id: str, doc_id: str, qvec: List[float], k: int = 30) -> List[SearchHit]:
+    def search_text_dense(self, *, tenant_id: str, document_id: str, qvec: List[float], k: int = 30) -> List[SearchHit]:
         qv = _to_pg_vector_literal(qvec)
         sql = """
         SELECT
-          d.doc_id,
           tc.document_id::text AS document_id,
           tc.chunk_index,
           tc.page_start,
@@ -980,13 +949,13 @@ class DocblockSearchClient:
          AND tc.document_id = d.document_id
          AND tc.version = d.active_version
         WHERE d.tenant_id = %(tenant_id)s
-          AND d.doc_id = %(doc_id)s
+          AND d.document_id = %(document_id)s::uuid
           AND tc.embedding IS NOT NULL
         ORDER BY tc.embedding <=> %(qvec)s::vector
         LIMIT %(k)s
         """
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_id": doc_id, "qvec": qv, "k": k})
+            cur.execute(sql, {"tenant_id": tenant_id, "document_id": document_id, "qvec": qv, "k": k})
             rows = cur.fetchall()
 
         hits: List[SearchHit] = []
@@ -999,9 +968,7 @@ class DocblockSearchClient:
             hits.append(
                 SearchHit(
                     source="text",
-                    doc_id=r["doc_id"],
                     document_id=r["document_id"],
-                    #doc_url=self._get_hit_url(doc_id=r["doc_id"]),
                     chunk_index=int(r["chunk_index"]),
                     score=float(r["score"]) if r["score"] is not None else 0.0,
                     content=r["content"] or "",
@@ -1010,11 +977,10 @@ class DocblockSearchClient:
             )
         return hits
 
-    def search_table_dense(self, *, tenant_id: str, doc_id: str, qvec: List[float], k: int = 30) -> List[SearchHit]:
+    def search_table_dense(self, *, tenant_id: str, document_id: str, qvec: List[float], k: int = 30) -> List[SearchHit]:
         qv = _to_pg_vector_literal(qvec)
         sql = """
         SELECT
-          d.doc_id,
           t.document_id::text AS document_id,
           t.chunk_index,
           t.page_start,
@@ -1028,13 +994,13 @@ class DocblockSearchClient:
          AND t.document_id = d.document_id
          AND t.version = d.active_version
         WHERE d.tenant_id = %(tenant_id)s
-          AND d.doc_id = %(doc_id)s
+          AND d.document_id = %(document_id)s::uuid
           AND t.embedding IS NOT NULL
         ORDER BY t.embedding <=> %(qvec)s::vector
         LIMIT %(k)s
         """
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_id": doc_id, "qvec": qv, "k": k})
+            cur.execute(sql, {"tenant_id": tenant_id, "document_id": document_id, "qvec": qv, "k": k})
             rows = cur.fetchall()
 
         hits: List[SearchHit] = []
@@ -1045,9 +1011,7 @@ class DocblockSearchClient:
             hits.append(
                 SearchHit(
                     source="table_dense",
-                    doc_id=r["doc_id"],
                     document_id=r["document_id"],
-                    #doc_url=self._get_hit_url(doc_id=r["doc_id"]),
                     chunk_index=int(r["chunk_index"]),
                     score=float(r["score"]) if r["score"] is not None else 0.0,
                     content=r["content"] or "",
@@ -1056,13 +1020,12 @@ class DocblockSearchClient:
             )
         return hits
 
-    def search_table_lexical(self, *, tenant_id: str, doc_id: str, query: str, k: int = 30) -> List[SearchHit]:
+    def search_table_lexical(self, *, tenant_id: str, document_id: str, query: str, k: int = 30) -> List[SearchHit]:
         """
         Uses pg_trgm similarity on table_chunks.lexical_text.
         """
         sql = """
         SELECT
-          d.doc_id,
           t.document_id::text AS document_id,
           t.chunk_index,
           t.page_start,
@@ -1076,13 +1039,13 @@ class DocblockSearchClient:
          AND t.document_id = d.document_id
          AND t.version = d.active_version
         WHERE d.tenant_id = %(tenant_id)s
-          AND d.doc_id = %(doc_id)s
+          AND d.document_id = %(document_id)s::uuid
           AND t.lexical_text IS NOT NULL
         ORDER BY similarity(t.lexical_text, %(q)s) DESC
         LIMIT %(k)s
         """
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_id": doc_id, "q": query, "k": k})
+            cur.execute(sql, {"tenant_id": tenant_id, "document_id": document_id, "q": query, "k": k})
             rows = cur.fetchall()
 
         hits: List[SearchHit] = []
@@ -1096,9 +1059,7 @@ class DocblockSearchClient:
             hits.append(
                 SearchHit(
                     source="table_lex",
-                    doc_id=r["doc_id"],
                     document_id=r["document_id"],
-                    #doc_url=self._get_hit_url(doc_id=r["doc_id"]),
                     chunk_index=int(r["chunk_index"]),
                     score=s,
                     content=r["content"] or "",
@@ -1107,11 +1068,10 @@ class DocblockSearchClient:
             )
         return hits
 
-    def search_image_text_dense(self, *, tenant_id: str, doc_id: str, qvec: List[float], k: int = 10) -> List[SearchHit]:
+    def search_image_text_dense(self, *, tenant_id: str, document_id: str, qvec: List[float], k: int = 10) -> List[SearchHit]:
         qv = _to_pg_vector_literal(qvec)
         sql = """
         SELECT
-          d.doc_id,
           ic.document_id::text AS document_id,
           ic.chunk_index,
           ic.page_start,
@@ -1125,13 +1085,13 @@ class DocblockSearchClient:
          AND ic.document_id = d.document_id
          AND ic.version = d.active_version
         WHERE d.tenant_id = %(tenant_id)s
-          AND d.doc_id = %(doc_id)s
+          AND d.document_id = %(document_id)s::uuid
           AND ic.text_embedding IS NOT NULL
         ORDER BY ic.text_embedding <=> %(qvec)s::vector
         LIMIT %(k)s
         """
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_id": doc_id, "qvec": qv, "k": k})
+            cur.execute(sql, {"tenant_id": tenant_id, "document_id": document_id, "qvec": qv, "k": k})
             rows = cur.fetchall()
 
         hits: List[SearchHit] = []
@@ -1142,9 +1102,7 @@ class DocblockSearchClient:
             hits.append(
                 SearchHit(
                     source="image_text",
-                    doc_id=r["doc_id"],
                     document_id=r["document_id"],
-                    #doc_url=self._get_hit_url(doc_id=r["doc_id"]),
                     chunk_index=int(r["chunk_index"]),
                     score=float(r["score"]) if r["score"] is not None else 0.0,
                     content=r["content"] or "",
@@ -1156,14 +1114,13 @@ class DocblockSearchClient:
     # ---------------------------
     # Low-level searches (SUMMARY)
     # ---------------------------
-    def search_summary_dense(self, *, tenant_id: str, doc_id: str, qvec: List[float], k: int = 5) -> List[SearchHit]:
+    def search_summary_dense(self, *, tenant_id: str, document_id: str, qvec: List[float], k: int = 5) -> List[SearchHit]:
         """
         One summary row per doc. We still return a "hit" for fusion/formatting.
         """
         qv = _to_pg_vector_literal(qvec)
         sql = """
         SELECT
-          d.doc_id,
           s.document_id::text AS document_id,
           s.summary_text AS content,
           s.metadata,
@@ -1173,13 +1130,13 @@ class DocblockSearchClient:
           ON s.tenant_id = d.tenant_id
          AND s.document_id = d.document_id
         WHERE d.tenant_id = %(tenant_id)s
-          AND d.doc_id = %(doc_id)s
+          AND d.document_id = %(document_id)s::uuid
           AND s.embedding IS NOT NULL
         ORDER BY s.embedding <=> %(qvec)s::vector
         LIMIT %(k)s
         """
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_id": doc_id, "qvec": qv, "k": k})
+            cur.execute(sql, {"tenant_id": tenant_id, "document_id": document_id, "qvec": qv, "k": k})
             rows = cur.fetchall()
 
         hits: List[SearchHit] = []
@@ -1187,9 +1144,7 @@ class DocblockSearchClient:
             hits.append(
                 SearchHit(
                     source="summary",
-                    doc_id=r["doc_id"],
                     document_id=r["document_id"],
-                    #doc_url=self._get_hit_url(doc_id=r["doc_id"]),
                     chunk_index=0,
                     score=float(r["score"]) if r["score"] is not None else 0.0,
                     content=r["content"] or "",
@@ -1198,13 +1153,12 @@ class DocblockSearchClient:
             )
         return hits
 
-    def search_summary_lexical(self, *, tenant_id: str, doc_id: str, query: str, k: int = 5) -> List[SearchHit]:
+    def search_summary_lexical(self, *, tenant_id: str, document_id: str, query: str, k: int = 5) -> List[SearchHit]:
         """
         Summary lexical via ts_rank on to_tsvector('simple', searchable_text).
         """
         sql = """
         SELECT
-          d.doc_id,
           s.document_id::text AS document_id,
           s.summary_text AS content,
           s.metadata,
@@ -1214,13 +1168,13 @@ class DocblockSearchClient:
           ON s.tenant_id = d.tenant_id
          AND s.document_id = d.document_id
         WHERE d.tenant_id = %(tenant_id)s
-          AND d.doc_id = %(doc_id)s
+          AND d.document_id = %(document_id)s::uuid
           AND plainto_tsquery('simple', %(q)s) @@ to_tsvector('simple', s.searchable_text)
         ORDER BY score DESC
         LIMIT %(k)s
         """
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "doc_id": doc_id, "q": query, "k": k})
+            cur.execute(sql, {"tenant_id": tenant_id, "document_id": document_id, "q": query, "k": k})
             rows = cur.fetchall()
 
         hits: List[SearchHit] = []
@@ -1231,9 +1185,7 @@ class DocblockSearchClient:
             hits.append(
                 SearchHit(
                     source="summary_lex",
-                    doc_id=r["doc_id"],
                     document_id=r["document_id"],
-                    #doc_url=self._get_hit_url(doc_id=r["doc_id"]),
                     chunk_index=0,
                     score=s,
                     content=r["content"] or "",
@@ -1324,7 +1276,6 @@ class DocblockSearchClient:
             out.append(
                 SearchHit(
                     source=h.source,
-                    doc_id=h.doc_id,
                     document_id=h.document_id,
                     chunk_index=h.chunk_index,
                     score=float(fused_s),
@@ -1343,14 +1294,14 @@ class DocblockSearchClient:
     def search(
         self,
         *,
-        doc_id: str,
+        document_id: str,
         query: str,
         access: AccessLevel = "detail",
         tenant_id: Optional[str] = None,
         top_k: int = 20,
         top_k_per_doc: int = 20,
         routing: bool = True,
-        router_model: str = "qwen3.5-9b",
+        router_model: str = settings.models.chat_model,
         enable_table_lex: bool = True,
         weights: Optional[Dict[str, float]] = None,
     ) -> List[SearchHit]:
@@ -1362,9 +1313,9 @@ class DocblockSearchClient:
         if t is None:
             raise ValueError("tenant_id is required for search")
         logger.info(
-            "[search:start] tenant_id=%s doc_id=%s access=%s top_k=%s top_k_per_doc=%s routing=%s enable_table_lex=%s query_len=%s",
+            "[search:start] tenant_id=%s document_id=%s access=%s top_k=%s top_k_per_doc=%s routing=%s enable_table_lex=%s query_len=%s",
             t,
-            doc_id,
+            document_id,
             access,
             top_k,
             top_k_per_doc,
@@ -1378,18 +1329,18 @@ class DocblockSearchClient:
 
             if access == "deny":
                 logger.info(
-                    "[search:end] tenant_id=%s doc_id=%s access=deny result_count=0 elapsed=%.2fs",
+                    "[search:end] tenant_id=%s document_id=%s access=deny result_count=0 elapsed=%.2fs",
                     t,
-                    doc_id,
+                    document_id,
                     time.perf_counter() - _t0,
                 )
                 return []
 
             if access == "summary":
-                summary_hits = self.search_summary_dense(tenant_id=t, doc_id=doc_id, qvec=qvec, k=5)
+                summary_hits = self.search_summary_dense(tenant_id=t, document_id=document_id, qvec=qvec, k=5)
                 summary_lex_hits: List[SearchHit] = []
                 try:
-                    summary_lex_hits = self.search_summary_lexical(tenant_id=t, doc_id=doc_id, query=query, k=5)
+                    summary_lex_hits = self.search_summary_lexical(tenant_id=t, document_id=document_id, query=query, k=5)
                 except Exception:
                     summary_lex_hits = []
 
@@ -1410,9 +1361,9 @@ class DocblockSearchClient:
                 )
                 out = fused[:top_k]
                 logger.info(
-                    "[search:summary] tenant_id=%s doc_id=%s summary_dense=%s summary_lex=%s result_count=%s elapsed=%.2fs",
+                    "[search:summary] tenant_id=%s document_id=%s summary_dense=%s summary_lex=%s result_count=%s elapsed=%.2fs",
                     t,
-                    doc_id,
+                    document_id,
                     len(summary_hits),
                     len(summary_lex_hits),
                     len(out),
@@ -1421,14 +1372,14 @@ class DocblockSearchClient:
                 return out
 
             # access == "detail"
-            text_hits = self.search_text_dense(tenant_id=t, doc_id=doc_id, qvec=qvec, k=top_k_per_doc)
-            table_dense_hits = self.search_table_dense(tenant_id=t, doc_id=doc_id, qvec=qvec, k=top_k_per_doc)
-            image_hits = self.search_image_text_dense(tenant_id=t, doc_id=doc_id, qvec=qvec, k=max(5, top_k_per_doc // 3))
+            text_hits = self.search_text_dense(tenant_id=t, document_id=document_id, qvec=qvec, k=top_k_per_doc)
+            table_dense_hits = self.search_table_dense(tenant_id=t, document_id=document_id, qvec=qvec, k=top_k_per_doc)
+            image_hits = self.search_image_text_dense(tenant_id=t, document_id=document_id, qvec=qvec, k=max(5, top_k_per_doc // 3))
 
             table_lex_hits: List[SearchHit] = []
             if enable_table_lex:
                 try:
-                    table_lex_hits = self.search_table_lexical(tenant_id=t, doc_id=doc_id, query=query, k=top_k_per_doc)
+                    table_lex_hits = self.search_table_lexical(tenant_id=t, document_id=document_id, query=query, k=top_k_per_doc)
                 except Exception:
                     table_lex_hits = []
 
@@ -1453,9 +1404,9 @@ class DocblockSearchClient:
             )
             out = fused[:top_k]
             logger.info(
-                "[search:end] tenant_id=%s doc_id=%s profile=%s text=%s table_dense=%s table_lex=%s image=%s result_count=%s elapsed=%.2fs",
+                "[search:end] tenant_id=%s document_id=%s profile=%s text=%s table_dense=%s table_lex=%s image=%s result_count=%s elapsed=%.2fs",
                 t,
-                doc_id,
+                document_id,
                 profile,
                 len(text_hits),
                 len(table_dense_hits),
@@ -1467,9 +1418,9 @@ class DocblockSearchClient:
             return out
         except Exception:
             logger.exception(
-                "[search:error] tenant_id=%s doc_id=%s access=%s routing=%s",
+                "[search:error] tenant_id=%s document_id=%s access=%s routing=%s",
                 t,
-                doc_id,
+                document_id,
                 access,
                 routing,
             )
@@ -1478,29 +1429,29 @@ class DocblockSearchClient:
     def multi_search(
         self,
         *,
-        doc_ids: List[str],
+        document_ids: List[str],
         query: str,
         access_map: Optional[Dict[str, AccessLevel]] = None,
         top_k_per_doc: int = 20,
         top_k: int = 20,
         routing: bool = True,
-        router_model: str = "qwen3:8b",
+        router_model: str = settings.models.chat_model,
         enable_table_lex: bool = True,
         weights: Optional[Dict[str, float]] = None,
         tenant_id: Optional[str] = None,
         rerank: bool = False,
-        rerank_model: str = "qwen3:8b",
+        rerank_model: str = settings.models.rerank_model,
     ) -> Dict[str, Any]:
         """
         Cross-doc retrieval, ACL-aware via access_map.
 
-        - access_map[doc_id] decides whether this doc is searched in detail or summary tier.
+        - access_map[document_id] decides whether this doc is searched in detail or summary tier.
         - deny docs are ignored.
         """
         _t0 = time.perf_counter()
         logger.info(
-            "[multi_search:start] doc_ids=%s top_k=%s top_k_per_doc=%s routing=%s rerank=%s enable_table_lex=%s query_len=%s",
-            len(doc_ids or []),
+            "[multi_search:start] document_ids=%s top_k=%s top_k_per_doc=%s routing=%s rerank=%s enable_table_lex=%s query_len=%s",
+            len(document_ids or []),
             top_k,
             top_k_per_doc,
             routing,
@@ -1508,38 +1459,38 @@ class DocblockSearchClient:
             enable_table_lex,
             len(query or ""),
         )
-        if not doc_ids:
-            logger.error("[multi_search:error] doc_ids is empty")
-            raise ValueError("doc_ids is empty")
+        if not document_ids:
+            logger.error("[multi_search:error] document_ids is empty")
+            raise ValueError("document_ids is empty")
 
         t = tenant_id if tenant_id is not None else self.tenant_id
         if t is None:
             raise ValueError("tenant_id is required for multi_search")
-        access_map = access_map or {d: "detail" for d in doc_ids}
+        access_map = access_map or {d: "detail" for d in document_ids}
 
-        # Deduplicate doc_ids while keeping order
-        used = list(dict.fromkeys([d for d in doc_ids if d]))
+        # Deduplicate document_ids while keeping order
+        used = list(dict.fromkeys([d for d in document_ids if d]))
 
         # Filter out deny early
         used = [d for d in used if access_map.get(d, "deny") != "deny"]
         logger.info(
-            "[multi_search:acl] tenant_id=%s input_doc_ids=%s usable_doc_ids=%s",
+            "[multi_search:acl] tenant_id=%s input_document_ids=%s usable_document_ids=%s",
             t,
-            len(doc_ids),
+            len(document_ids),
             len(used),
         )
         if not used:
             logger.info(
-                "[multi_search:end] tenant_id=%s usable_doc_ids=0 result_count=0 elapsed=%.2fs",
+                "[multi_search:end] tenant_id=%s usable_document_ids=0 result_count=0 elapsed=%.2fs",
                 t,
                 time.perf_counter() - _t0,
             )
             return {
                 "query": query,
-                "doc_ids_input": doc_ids,
-                "doc_ids_used": [],
+                "document_ids_input": document_ids,
+                "document_ids_used": [],
                 "hits": [],
-                "note": "No doc_ids left after ACL filtering (deny).",
+                "note": "No document_ids left after ACL filtering (deny).",
             }
 
         qvec = self.embed_query(query)
@@ -1568,10 +1519,10 @@ class DocblockSearchClient:
         # --- summary tier: per-doc summary_chunks search ---
         summary_ids = [d for d in used if access_map.get(d, "deny") == "summary"]
         for did in summary_ids:
-            s_dense = self.search_summary_dense(tenant_id=t, doc_id=did, qvec=qvec, k=5)
+            s_dense = self.search_summary_dense(tenant_id=t, document_id=did, qvec=qvec, k=5)
             s_lex: List[SearchHit] = []
             try:
-                s_lex = self.search_summary_lexical(tenant_id=t, doc_id=did, query=query, k=5)
+                s_lex = self.search_summary_lexical(tenant_id=t, document_id=did, query=query, k=5)
             except Exception:
                 s_lex = []
 
@@ -1599,7 +1550,7 @@ class DocblockSearchClient:
             # 你可以先用一個保守值：TopN=100；資料大了再調小
             routed_detail_ids = self.route_docs_text_lexical(
                 tenant_id=t,
-                doc_ids=detail_ids,
+                document_ids=detail_ids,
                 query=query,
                 n=min(100, len(detail_ids)),
             )
@@ -1622,14 +1573,14 @@ class DocblockSearchClient:
             
             text_hits = self.search_text_dense_multi(
                 tenant_id=t,
-                doc_ids=routed_detail_ids,
+                document_ids=routed_detail_ids,
                 qvec=qvec,
                 k=k_text,
             )
 
             table_dense_hits = self.search_table_dense_multi(
                 tenant_id=t,
-                doc_ids=routed_detail_ids,
+                document_ids=routed_detail_ids,
                 qvec=qvec,
                 k=k_table,
             )
@@ -1638,14 +1589,14 @@ class DocblockSearchClient:
             if enable_table_lex:
                 table_lex_hits = self.search_table_lexical_multi(
                     tenant_id=t,
-                    doc_ids=routed_detail_ids,
+                    document_ids=routed_detail_ids,
                     query=query,
                     k=k_table,
                 )
 
             image_hits = self.search_image_text_dense_multi(
                 tenant_id=t,
-                doc_ids=routed_detail_ids,
+                document_ids=routed_detail_ids,
                 qvec=qvec,
                 k=k_img,
             )
@@ -1701,7 +1652,7 @@ class DocblockSearchClient:
             reranked = all_hits
 
         logger.info(
-            "[multi_search:end] tenant_id=%s used_doc_ids=%s all_hits=%s rerank_hits=%s returned_top_k=%s elapsed=%.2fs",
+            "[multi_search:end] tenant_id=%s used_document_ids=%s all_hits=%s rerank_hits=%s returned_top_k=%s elapsed=%.2fs",
             t,
             len(used),
             len(all_hits),
@@ -1712,8 +1663,8 @@ class DocblockSearchClient:
         
         return {
             "query": query,
-            "doc_ids_input": doc_ids,
-            "doc_ids_used": used,
+            "document_ids_input": document_ids,
+            "document_ids_used": used,
             "routing": {
                 "enabled": routing,
                 "router_model": router_model,
@@ -1731,13 +1682,12 @@ class DocblockSearchClient:
     @staticmethod
     def format_context(hits: List[SearchHit], max_chars_per_hit: int = 1800) -> str:
         """
-        Format a list of SearchHit objects into a string with doc_id and chunk_index information.
-        [1] doc_id=..., source=..., chunk_index=..., content=...
-        [2] doc_id=..., source=..., chunk_index=..., content=...
+        Format a list of SearchHit objects into a string with document_id and chunk_index information.
+        [1] document_id=..., source=..., chunk_index=..., content=...
+        [2] document_id=..., source=..., chunk_index=..., content=...
         ... etc.
         """
         parts: List[str] = []
-        print(hits)
         for i, h in enumerate(hits, start=1):
             meta = h.metadata or {}
             #page_start = meta.get("page_start")
@@ -1747,7 +1697,7 @@ class DocblockSearchClient:
             #    pages = f" pages={page_start}-{page_end}"
             source = meta.get("source_path", "unknown").split("/")[-1]
             hit_url = h.doc_url or ""
-            header = f"[{i}] doc_id={h.doc_id}, 文件名稱={source}, chunk_index={h.chunk_index}, url={hit_url}"
+            header = f"[{i}] document_id={h.document_id}, 文件名稱={source}, chunk_index={h.chunk_index}, url={hit_url}"
             content = (h.content or "").strip()
             if len(content) > max_chars_per_hit:
                 content = content[: max_chars_per_hit].rstrip() + "\n…(truncated)…"

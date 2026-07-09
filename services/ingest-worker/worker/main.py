@@ -31,16 +31,19 @@ class MarkerJobRequest(BaseModel):
     job_id: str
     pdf_path: str
     output_dir: str
-    doc_id: Optional[str] = None  # defaults to pdf stem if omitted
+    document_id: Optional[str] = None  # defaults to pdf stem if omitted (used as working directory name)
 
 
 class BuildChunksJobRequest(BaseModel):
     job_id: str
     fixed_md: str
     out_json: str
-    doc_id: Optional[str] = None
+    document_id: str  # DB UUID; caller (document-api) generates this at upload time
     source_path: Optional[str] = None
-    document_id: Optional[str] = None   # DB UUID; auto-generated if omitted
+    title: Optional[str] = None
+    original_filename: Optional[str] = None
+    file_size: Optional[int] = None
+    mime_type: Optional[str] = None
 
 
 class IngestJobRequest(BaseModel):
@@ -53,9 +56,12 @@ class FullPipelineJobRequest(BaseModel):
     job_id: str
     pdf_path: str
     work_dir: str
-    doc_id: Optional[str] = None        # external/Outline logical ID (TEXT)
-    document_id: Optional[str] = None   # DB UUID; auto-generated if omitted
+    document_id: str  # DB UUID; caller (document-api) generates this at upload time
     source_path: Optional[str] = None
+    title: Optional[str] = None
+    original_filename: Optional[str] = None
+    file_size: Optional[int] = None
+    mime_type: Optional[str] = None
 
 
 def _set_status(job_id: str, status: JobStatus, detail: str = ""):
@@ -67,25 +73,29 @@ async def _run_in_thread(fn, *args):
     return await loop.run_in_executor(None, fn, *args)
 
 
-async def _bg_marker(job_id: str, pdf_path: str, output_dir: str, doc_id: str = ""):
+async def _bg_marker(job_id: str, pdf_path: str, output_dir: str, document_id: str = ""):
     _set_status(job_id, JobStatus.running)
     try:
-        resolved_doc_id = doc_id or Path(pdf_path).stem
-        await _run_in_thread(run_marker_to_md, job_id, resolved_doc_id, pdf_path, output_dir)
+        resolved_document_id = document_id or Path(pdf_path).stem
+        await _run_in_thread(run_marker_to_md, job_id, resolved_document_id, pdf_path, output_dir)
         _set_status(job_id, JobStatus.done)
     except Exception as e:
         _set_status(job_id, JobStatus.failed, traceback.format_exc())
 
 
-async def _bg_build_chunks(job_id: str, fixed_md: str, out_json: str, doc_id, source_path, document_id):
-    import uuid
+async def _bg_build_chunks(
+    job_id: str, fixed_md: str, out_json: str, source_path, document_id,
+    title=None, original_filename=None, file_size=None, mime_type=None,
+):
     from docblock_core.config import settings
 
     _set_status(job_id, JobStatus.running)
     try:
-        resolved_document_id = document_id or str(uuid.uuid4())
         tenant_id = settings.db.tenant_id
-        await _run_in_thread(run_build_chunks, fixed_md, out_json, doc_id, source_path, tenant_id, resolved_document_id)
+        await _run_in_thread(
+            run_build_chunks, fixed_md, out_json, source_path, tenant_id, document_id,
+            title, original_filename, file_size, mime_type,
+        )
         _set_status(job_id, JobStatus.done)
     except Exception as e:
         _set_status(job_id, JobStatus.failed, traceback.format_exc())
@@ -100,23 +110,27 @@ async def _bg_ingest(job_id: str, chunk_block_json: str):
         _set_status(job_id, JobStatus.failed, traceback.format_exc())
 
 
-async def _bg_full_pipeline(job_id: str, pdf_path: str, work_dir: str, doc_id, document_id, source_path):
-    import uuid
+async def _bg_full_pipeline(
+    job_id: str, pdf_path: str, work_dir: str, document_id: str, source_path,
+    title=None, original_filename=None, file_size=None, mime_type=None,
+):
     from pathlib import Path
     from docblock_core.config import settings
 
     _set_status(job_id, JobStatus.running, "stage: marker")
     try:
-        md_path = await _run_in_thread(run_marker_to_md, job_id, doc_id, pdf_path, work_dir)
+        md_path = await _run_in_thread(run_marker_to_md, job_id, document_id, pdf_path, work_dir)
 
         pdf_stem = Path(pdf_path).stem
         out_json = str(Path(work_dir) / f"{pdf_stem}.chunk_block.json")
 
-        resolved_document_id = document_id or str(uuid.uuid4())
         tenant_id = settings.db.tenant_id
 
         _set_status(job_id, JobStatus.running, "stage: build_chunks")
-        await _run_in_thread(run_build_chunks, md_path, out_json, doc_id, source_path, tenant_id, resolved_document_id)
+        await _run_in_thread(
+            run_build_chunks, md_path, out_json, source_path, tenant_id, document_id,
+            title, original_filename, file_size, mime_type,
+        )
 
         _set_status(job_id, JobStatus.running, "stage: ingest")
         await _run_in_thread(run_ingest_chunks, out_json)
@@ -129,14 +143,17 @@ async def _bg_full_pipeline(job_id: str, pdf_path: str, work_dir: str, doc_id, d
 @app.post("/jobs/marker")
 def submit_marker_job(req: MarkerJobRequest, bg: BackgroundTasks):
     _set_status(req.job_id, JobStatus.pending)
-    bg.add_task(_bg_marker, req.job_id, req.pdf_path, req.output_dir, req.doc_id or "")
+    bg.add_task(_bg_marker, req.job_id, req.pdf_path, req.output_dir, req.document_id or "")
     return {"job_id": req.job_id, "status": JobStatus.pending}
 
 
 @app.post("/jobs/build-chunks")
 def submit_build_chunks_job(req: BuildChunksJobRequest, bg: BackgroundTasks):
     _set_status(req.job_id, JobStatus.pending)
-    bg.add_task(_bg_build_chunks, req.job_id, req.fixed_md, req.out_json, req.doc_id, req.source_path, req.document_id)
+    bg.add_task(
+        _bg_build_chunks, req.job_id, req.fixed_md, req.out_json, req.source_path, req.document_id,
+        req.title, req.original_filename, req.file_size, req.mime_type,
+    )
     return {"job_id": req.job_id, "status": JobStatus.pending}
 
 
@@ -151,7 +168,10 @@ def submit_ingest_job(req: IngestJobRequest, bg: BackgroundTasks):
 def submit_full_pipeline(req: FullPipelineJobRequest, bg: BackgroundTasks):
     """Submit a full PDF → chunks → ingest pipeline job."""
     _set_status(req.job_id, JobStatus.pending)
-    bg.add_task(_bg_full_pipeline, req.job_id, req.pdf_path, req.work_dir, req.doc_id, req.document_id, req.source_path)
+    bg.add_task(
+        _bg_full_pipeline, req.job_id, req.pdf_path, req.work_dir, req.document_id, req.source_path,
+        req.title, req.original_filename, req.file_size, req.mime_type,
+    )
     return {"job_id": req.job_id, "status": JobStatus.pending}
 
 

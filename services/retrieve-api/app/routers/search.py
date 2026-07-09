@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-import psycopg2
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -28,8 +27,7 @@ def _hit_to_dict(h: SearchHit, rank: int, preview_chars: int = 400) -> Dict[str,
     preview = content[:preview_chars].rstrip() + ("…" if len(content) > preview_chars else "")
     return {
         "rank": rank,
-        "doc_id": h.doc_id,
-        "document_id": getattr(h, "document_id", None),
+        "document_id": h.document_id,
         "doc_url": getattr(h, "doc_url", None),
         "source": h.source,
         "score": float(h.score),
@@ -46,35 +44,21 @@ def _hit_to_dict(h: SearchHit, rank: int, preview_chars: int = 400) -> Dict[str,
 class SearchRequest(BaseModel):
     query: str
     user_id: str
-    doc_ids: Optional[List[str]] = None
+    document_ids: Optional[List[str]] = None
     top_k: int = 10
     top_k_per_doc: int = 20
     routing: bool = True
-    router_model: str = "qwen3.5-9b"
+    router_model: str = settings.models.chat_model
     enable_table_lex: bool = True
     preview_chars: int = 400
     max_docs: int = 5000
-
-
-class SearchOpenRequest(BaseModel):
-    query: str
-    doc_ids: Optional[List[str]] = None
-    top_k: int = 10
-    top_k_per_doc: int = 20
-    routing: bool = True
-    router_model: str = "qwen3.5-9b"
-    enable_table_lex: bool = True
-    preview_chars: int = 400
-    max_docs: int = 5000
-    rerank: bool = False
-    rerank_model: str = "qwen3:8b"
 
 
 class AnswerRequest(BaseModel):
-    doc_id: str
+    document_id: str
     question: str
     user_id: str
-    doc_ids: Optional[List[str]] = None
+    document_ids: Optional[List[str]] = None
     top_k: int = 10
     routing: bool = True
 
@@ -88,7 +72,7 @@ def search(req: SearchRequest, request: Request) -> Dict[str, Any]:
         pg_dsn=settings.db.pg_dsn,
         tenant_id=tenant_id,
         user_id=req.user_id,
-        candidate_doc_ids=req.doc_ids,
+        candidate_document_ids=req.document_ids,
         limit=req.max_docs,
     )
 
@@ -97,14 +81,14 @@ def search(req: SearchRequest, request: Request) -> Dict[str, Any]:
         return {
             "query": req.query,
             "user": {"user_id": req.user_id, "principals": principals},
-            "doc_ids_used": [],
+            "document_ids_used": [],
             "access": dict(access_map),
             "hits": [],
             "note": "No documents available after ACL filtering.",
         }
 
     res = _sc(request).multi_search(
-        doc_ids=allowed,
+        document_ids=allowed,
         access_map=access_map,
         query=req.query,
         top_k=req.top_k,
@@ -119,52 +103,10 @@ def search(req: SearchRequest, request: Request) -> Dict[str, Any]:
     return {
         "query": req.query,
         "user": {"user_id": req.user_id, "principals": principals},
-        "doc_ids_used": res.get("doc_ids_used", allowed),
+        "document_ids_used": res.get("document_ids_used", allowed),
         "access": dict(access_map),
         "routing": res.get("routing", {}),
         "hits": [_hit_to_dict(h, i + 1, req.preview_chars) for i, h in enumerate(hits)],
-    }
-
-
-@router.post("/search/open")
-def search_open(req: SearchOpenRequest, request: Request) -> Dict[str, Any]:
-    """Search across all documents without ACL filtering (admin use)."""
-    tenant_id = settings.db.tenant_id
-
-    doc_ids = req.doc_ids
-    if not doc_ids:
-        with psycopg2.connect(settings.db.pg_dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT doc_id FROM documents WHERE tenant_id = %s ORDER BY doc_id LIMIT %s",
-                    (tenant_id, req.max_docs),
-                )
-                doc_ids = [str(r[0]) for r in cur.fetchall()]
-
-    if not doc_ids:
-        return {"query": req.query, "doc_ids_used": [], "hits": [], "note": "No documents available."}
-
-    res = _sc(request).multi_search(
-        doc_ids=doc_ids,
-        access_map={},
-        query=req.query,
-        top_k=req.top_k,
-        top_k_per_doc=req.top_k_per_doc,
-        routing=req.routing,
-        router_model=req.router_model,
-        enable_table_lex=req.enable_table_lex,
-        tenant_id=tenant_id,
-        rerank=req.rerank,
-        rerank_model=req.rerank_model,
-    )
-
-    hits = res.get("rerank_hits" if req.rerank else "hits", []) or []
-    return {
-        "query": req.query,
-        "doc_ids_used": res.get("doc_ids_used", doc_ids),
-        "routing": res.get("routing", {}),
-        "hits": [_hit_to_dict(h, i + 1, req.preview_chars) for i, h in enumerate(hits)],
-        "note": "ACL bypassed",
     }
 
 
@@ -177,19 +119,19 @@ def answer(req: AnswerRequest, request: Request) -> Dict[str, Any]:
         pg_dsn=settings.db.pg_dsn,
         tenant_id=tenant_id,
         user_id=req.user_id,
-        candidate_doc_ids=req.doc_ids,
+        candidate_document_ids=req.document_ids,
         limit=5000,
     )
 
-    access = access_map.get(req.doc_id, "deny")
+    access = access_map.get(req.document_id, "deny")
     if access == "deny":
         raise HTTPException(
             status_code=403,
-            detail=f"ACL_DENY: user '{req.user_id}' has no access to doc_id='{req.doc_id}'",
+            detail=f"ACL_DENY: user '{req.user_id}' has no access to document_id='{req.document_id}'",
         )
 
     result = _rag(request).generate(
-        doc_id=req.doc_id,
+        document_id=req.document_id,
         question=req.question,
         top_k=req.top_k,
         enable_table_lex=True,
@@ -199,7 +141,7 @@ def answer(req: AnswerRequest, request: Request) -> Dict[str, Any]:
     citations = [
         {
             "index": i + 1,
-            "doc_id": getattr(h, "doc_id", req.doc_id),
+            "document_id": getattr(h, "document_id", req.document_id),
             "source": h.source,
             "chunk_index": h.chunk_index,
             "page_start": (h.metadata or {}).get("page_start"),
@@ -215,6 +157,6 @@ def answer(req: AnswerRequest, request: Request) -> Dict[str, Any]:
         "citations": citations,
         "model": result.model,
         "user": {"user_id": req.user_id, "principals": principals},
-        "doc_id": req.doc_id,
-        "doc_id_access": access,
+        "document_id": req.document_id,
+        "document_id_access": access,
     }

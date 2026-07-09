@@ -11,12 +11,17 @@ from app.db.user_repository import UserRepository
 def create_app() -> FastAPI:
     app = FastAPI(title="Docblock Webhook Service - Keycloak User Sync")
 
+    if not settings.keycloak.CLIENT_SECRET:
+        raise RuntimeError("KEYCLOAK_CLIENT_SECRET is not set")
+    if not settings.keycloak.WEBHOOK_SECRET:
+        raise RuntimeError("WEBHOOK_SECRET is not set")
+
     keycloak_client = KeycloakClient(
         keycloak_url=settings.keycloak.KEYCLOAK_URL,
         realm=settings.keycloak.KEYCLOAK_REALM,
         client_id=settings.keycloak.CLIENT_ID,
         client_secret=settings.keycloak.CLIENT_SECRET,
-        verify=False,
+        verify=settings.keycloak.VERIFY,
     )
 
     user_repository = UserRepository(

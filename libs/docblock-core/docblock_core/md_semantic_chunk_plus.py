@@ -4,7 +4,7 @@
 md_semantic_chunk_plus.py (enhanced)
 - Table-aware semantic chunking for Marker-produced Markdown using a local Ollama LLM.
 - Each table becomes an isolated chunk (placeholder-driven).
-- Adds metadata: doc_id, source_path, is_table, table_name/table_index, columns, key_terms, model_hint.
+- Adds metadata: document_id, source_path, is_table, table_name/table_index, columns, key_terms, model_hint.
 - NEW:
   - Always build deterministic (local) table_profile + improved key_terms for huge tables (no info loss).
   - Optional LLM-based table_capabilities + fields (navigation/usage hints, NOT summarization).
@@ -17,6 +17,7 @@ md_semantic_chunk_plus.py (enhanced)
 import os, re, json, argparse, hashlib
 from typing import List, Dict, Tuple, Optional
 import requests
+from docblock_core.llm_http import litellm_headers
 
 
 # ============================================================
@@ -26,14 +27,14 @@ import requests
 def ollama_generate(model: str, prompt: str,
                     url="http://localhost:4000",
                     temperature=0.0, timeout=600) -> str:
-    """Call LLM via OpenAI /v1/chat/completions (routes through nostr-proxy in k8s)."""
+    """Call LLM via OpenAI /v1/chat/completions (LiteLLM)."""
     endpoint = url.rstrip("/") + "/v1/chat/completions"
     r = requests.post(endpoint, json={
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "temperature": temperature,
-    }, timeout=timeout)
+    }, headers=litellm_headers(), timeout=timeout)
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 
@@ -624,7 +625,7 @@ def segment_with_ollama(text: str, model: str, url: str, target_tokens: int, har
         ],
         "stream": False,
         "temperature": 0.0,
-    }, timeout=timeout)
+    }, headers=litellm_headers(), timeout=timeout)
     resp.raise_for_status()
     raw = resp.json()["choices"][0]["message"]["content"]
     data = safe_json_load(raw)
@@ -697,7 +698,7 @@ def summarize_table_with_ollama(table_md: str, model: str, url: str, timeout: in
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
             "temperature": 0.0,
-        }, timeout=timeout)
+        }, headers=litellm_headers(), timeout=timeout)
         resp.raise_for_status()
         raw = resp.json()["choices"][0]["message"]["content"]
         data = json.loads(raw)
@@ -723,13 +724,13 @@ def summarize_table_with_ollama(table_md: str, model: str, url: str, timeout: in
 # Metadata builder (enhanced)
 # ============================================================
 
-def make_metadata(doc_id: str, source_path: str, is_table: bool, model_hint: str,
+def make_metadata(document_id: str, source_path: str, is_table: bool, model_hint: str,
                   table_key: Optional[str], tables_meta: Dict[str,Dict],
                   summarize: bool, summary_model: str, url: str,
                   infer_table_capabilities: bool = False,
                   capabilities_model: Optional[str] = None) -> Dict[str, object]:
     meta = {
-        "doc_id": doc_id,
+        "document_id": document_id,
         "source_path": source_path,
         "is_table": bool(is_table),
         "model_hint": model_hint
@@ -787,7 +788,7 @@ def make_metadata(doc_id: str, source_path: str, is_table: bool, model_hint: str
 
 def build_chunks(plain_text: str, spans: List[Dict], code_map: Dict[str,str], table_map: Dict[str,str],
                  tables_meta: Dict[str,Dict], inter_chunk_overlap_chars: int,
-                 doc_id: str, source_path: str,
+                 document_id: str, source_path: str,
                  summarize_tables: bool, summary_model: str, ollama_url: str,
                  infer_table_capabilities: bool = False,
                  capabilities_model: Optional[str] = None) -> List[Dict]:
@@ -803,7 +804,7 @@ def build_chunks(plain_text: str, spans: List[Dict], code_map: Dict[str,str], ta
             if table_key and table_key in table_map:
                 text_restored = restore_placeholders(piece, code_map, table_map)
                 meta = make_metadata(
-                    doc_id=doc_id,
+                    document_id=document_id,
                     source_path=source_path,
                     is_table=True,
                     model_hint="table",
@@ -825,7 +826,7 @@ def build_chunks(plain_text: str, spans: List[Dict], code_map: Dict[str,str], ta
                 if piece.strip():
                     text_restored = restore_placeholders(piece, code_map, table_map)
                     meta = make_metadata(
-                        doc_id=doc_id,
+                        document_id=document_id,
                         source_path=source_path,
                         is_table=False,
                         model_hint="text",
@@ -861,7 +862,7 @@ def parser():
     ap.add_argument("--window-chars", type=int, default=15000, help="Sliding window size in characters")
     ap.add_argument("--window-overlap", type=int, default=500, help="Overlap between windows")
     ap.add_argument("--inter-chunk-overlap", type=int, default=220, help="Text overlap added at chunk joins")
-    ap.add_argument("--doc-id", default=None, help="doc_id for metadata (default: basename of md)")
+    ap.add_argument("--document-id", default=None, help="document_id for metadata (default: basename of md)")
     ap.add_argument("--source-path", default=None, help="source_path for metadata (default: md path)")
 
     # Existing (kept)
@@ -890,7 +891,7 @@ def md_semantic_chunker(md_path: str, output_path: str, **kwargs):
         "hard_min_chars": 300,
         "window_chars": 15000,
         "window_overlap": 500,
-        "doc_id": None,
+        "document_id": None,
         "source_path": None,
         "inter_chunk_overlap": 220,
 
@@ -940,7 +941,7 @@ def md_semantic_chunker(md_path: str, output_path: str, **kwargs):
     merged.sort(key=lambda x: (x["start"], x["end"]))
     merged = validate_spans(merged, len(plain))
 
-    doc_id = args.doc_id or os.path.basename(args.md)
+    document_id = args.document_id or os.path.basename(args.md)
     source_path = args.source_path or os.path.abspath(args.md)
     summary_model = args.summary_model or args.model
     capabilities_model = args.capabilities_model or summary_model or args.model
@@ -952,7 +953,7 @@ def md_semantic_chunker(md_path: str, output_path: str, **kwargs):
         table_map=table_map,
         tables_meta=tables_meta,
         inter_chunk_overlap_chars=args.inter_chunk_overlap,
-        doc_id=doc_id,
+        document_id=document_id,
         source_path=source_path,
         summarize_tables=bool(args.summarize_tables),
         summary_model=summary_model,

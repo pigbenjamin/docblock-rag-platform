@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 
 import requests
-import psycopg2
 from fastmcp import FastMCP
 
 from docblock_core.rag import RagClient
@@ -37,8 +36,7 @@ def _hit_to_dict(h: SearchHit, rank: int, preview_chars: int = 400) -> Dict[str,
     preview = content[:preview_chars].rstrip() + ("…" if len(content) > preview_chars else "")
     return {
         "rank": rank,
-        "doc_id": h.doc_id,
-        "document_id": getattr(h, "document_id", None),
+        "document_id": h.document_id,
         "doc_url": getattr(h, "doc_url", None),
         "source": h.source,
         "score": float(h.score),
@@ -69,10 +67,10 @@ def _ollama_chat(messages: List[Dict[str, str]], *, model: str, timeout: int = 1
     description="Answer a question using document-specific RAG with citations (ACL enforced: detail/summary/deny).",
 )
 def rag_answer(
-    doc_id: str,
+    document_id: str,
     question: str,
     user_id: str,
-    doc_ids: Optional[List[str]] = None,  # optional candidate scope
+    document_ids: Optional[List[str]] = None,  # optional candidate scope
     top_k: int = 10,
     routing: bool = True,
 ) -> Dict[str, Any]:
@@ -87,27 +85,27 @@ def rag_answer(
         pg_dsn=settings.db.pg_dsn,
         tenant_id=tenant_id,
         user_id=user_id,
-        candidate_doc_ids=doc_ids,
+        candidate_document_ids=document_ids,
         limit=5000,
     )
 
-    access = access_map.get(doc_id, "deny")
+    access = access_map.get(document_id, "deny")
     if access == "deny":
         return {
             "answer": "",
             "citations": [],
             "model": getattr(settings.models, "chat_model", None),
             "error": "ACL_DENY",
-            "message": f"user '{user_id}' is not allowed to access doc_id='{doc_id}'",
+            "message": f"user '{user_id}' is not allowed to access document_id='{document_id}'",
             "user": {"user_id": user_id, "principals": principals},
-            "doc_id_requested": doc_id,
-            "doc_id_access": access,
+            "document_id_requested": document_id,
+            "document_id_access": access,
         }
 
     if access == "summary":
         # summary-only retrieval
         hits = _get_search_client().search(
-            doc_id=doc_id,
+            document_id=document_id,
             query=question,
             access="summary",
             tenant_id=tenant_id,
@@ -137,7 +135,7 @@ def rag_answer(
             citations.append(
                 {
                     "index": i,
-                    "doc_id": h.doc_id,
+                    "document_id": h.document_id,
                     "source": h.source,
                     "chunk_index": h.chunk_index,
                     "page_start": (h.metadata or {}).get("page_start"),
@@ -150,14 +148,14 @@ def rag_answer(
             "citations": citations,
             "model": str(chat_model),
             "user": {"user_id": user_id, "principals": principals},
-            "doc_id_requested": doc_id,
-            "doc_id_access": access,
+            "document_id_requested": document_id,
+            "document_id_access": access,
             "routing": {"enabled": False, "note": "summary-only"},
         }
 
     # access == detail
     result = _get_rag().generate(
-        doc_id=doc_id,
+        document_id=document_id,
         question=question,
         top_k=top_k,
         enable_table_lex=True,
@@ -170,7 +168,7 @@ def rag_answer(
         citations.append(
             {
                 "index": i,
-                "doc_id": getattr(h, "doc_id", doc_id),
+                "document_id": getattr(h, "document_id", document_id),
                 "source": h.source,
                 "chunk_index": h.chunk_index,
                 "page_start": meta.get("page_start"),
@@ -183,8 +181,8 @@ def rag_answer(
         "citations": citations,
         "model": result.model,
         "user": {"user_id": user_id, "principals": principals},
-        "doc_id_requested": doc_id,
-        "doc_id_access": access,
+        "document_id_requested": document_id,
+        "document_id_access": access,
         "routing": {"enabled": routing},
     }
 
@@ -199,11 +197,11 @@ def rag_answer(
 def rag_search(
     query: str,
     user_id: str,
-    doc_ids: Optional[List[str]] = None,  # optional dataset filter
+    document_ids: Optional[List[str]] = None,  # optional dataset filter
     top_k: int = 10,
     top_k_per_doc: int = 20,
     routing: bool = True,
-    router_model: str = "qwen2:7b",
+    router_model: str = settings.models.chat_model,
     enable_table_lex: bool = True,
     preview_chars: int = 400,
     max_docs: int = 5000,
@@ -214,7 +212,7 @@ def rag_search(
         pg_dsn=settings.db.pg_dsn,
         tenant_id=tenant_id,
         user_id=user_id,
-        candidate_doc_ids=doc_ids,
+        candidate_document_ids=document_ids,
         limit=max_docs,
     )
 
@@ -224,14 +222,14 @@ def rag_search(
         return {
             "query": query,
             "user": {"user_id": user_id, "principals": principals},
-            "doc_ids_input": doc_ids or [],
-            "doc_ids_used": [],
+            "document_ids_input": document_ids or [],
+            "document_ids_used": [],
             "hits": [],
             "note": "No documents available after ACL filtering.",
         }
 
     res = _get_search_client().multi_search(
-        doc_ids=allowed,
+        document_ids=allowed,
         access_map=access_map,
         query=query,
         top_k=top_k,
@@ -248,228 +246,12 @@ def rag_search(
     return {
         "query": query,
         "user": {"user_id": user_id, "principals": principals},
-        "doc_ids_input": doc_ids or [],
-        "doc_ids_used": res.get("doc_ids_used", allowed),
+        "document_ids_input": document_ids or [],
+        "document_ids_used": res.get("document_ids_used", allowed),
         "access": res.get("access", {}),
         "routing": res.get("routing", {"enabled": routing, "router_model": router_model}),
         "hits": hits_out,
     }
-
-def _rag_search_open_impl(
-    query: str,
-    doc_ids: Optional[List[str]] = None,
-    top_k: int = 10,
-    top_k_per_doc: int = 20,
-    routing: bool = True,
-    router_model: str = "qwen2:7b",
-    enable_table_lex: bool = True,
-    preview_chars: int = 400,
-    max_docs: int = 5000,
-    rerank: bool = False,
-    rerank_model: str = "qwen3:8b",
-) -> Dict[str, Any]:
-    """Search across all documents without ACL filtering."""
-    tenant_id = settings.db.tenant_id
-
-    # If doc_ids not provided, load all doc_ids for tenant
-    if not doc_ids:
-        with psycopg2.connect(settings.db.pg_dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT doc_id
-                    FROM documents
-                    WHERE tenant_id = %s
-                    ORDER BY doc_id
-                    LIMIT %s
-                    """,
-                    (tenant_id, max_docs),
-                )
-                rows = cur.fetchall()
-        doc_ids = [str(r[0]) for r in rows]
-
-    if not doc_ids:
-        return {
-            "query": query,
-            "doc_ids_input": [],
-            "doc_ids_used": [],
-            "routing": {"enabled": routing, "router_model": router_model},
-            "hits": [],
-            "note": "No documents available.",
-        }
-
-    res = _get_search_client().multi_search(
-        doc_ids=doc_ids,
-        access_map={},
-        query=query,
-        top_k=top_k,
-        top_k_per_doc=top_k_per_doc,
-        routing=routing,
-        router_model=router_model,
-        enable_table_lex=enable_table_lex,
-        tenant_id=tenant_id,
-        rerank=rerank,
-        rerank_model=rerank_model,
-    )
-
-    hits = res.get("hits", []) or []
-
-    if rerank:
-        hits = res.get("rerank_hits", []) or []
-
-    # add url to hits
-    for h in hits:
-        doc_id = getattr(h, "doc_id", None)
-        if doc_id:
-            doc_url = _get_search_client()._get_hit_url(doc_id)
-            setattr(h, "doc_url", doc_url)
-
-    
-    hits_out = [_hit_to_dict(h, i + 1, preview_chars=preview_chars) for i, h in enumerate(hits)]
-    
-    return {
-        "query": query,
-        "doc_ids_input": doc_ids or [],
-        "doc_ids_used": res.get("doc_ids_used", doc_ids or []),
-        "routing": res.get("routing", {"enabled": routing, "router_model": router_model}),
-        "hits": hits_out,
-        "note": "ACL bypassed",
-    }
-
-@mcp.tool(
-    name="rag_search_open",
-    description="Cross-doc retrieval without ACL filtering. Searches all documents.",
-)
-def rag_search_open(
-    query: str,
-    doc_ids: Optional[List[str]] = None,
-    top_k: int = 10,
-    top_k_per_doc: int = 20,
-    routing: bool = True,
-    router_model: str = "qwen2:7b",
-    enable_table_lex: bool = True,
-    preview_chars: int = 400,
-    max_docs: int = 5000,
-    rerank: bool = False,
-    rerank_model: str = "qwen3:8b",
-) -> Dict[str, Any]:
-    return _rag_search_open_impl(
-        query=query,
-        doc_ids=doc_ids,
-        top_k=top_k,
-        top_k_per_doc=top_k_per_doc,
-        routing=routing,
-        router_model=router_model,
-        enable_table_lex=enable_table_lex,
-        preview_chars=preview_chars,
-        max_docs=max_docs,
-        rerank=rerank,
-        rerank_model=rerank_model,
-    )
-
-
-def _rag_search_open_hitstring_impl(
-    query: str,
-    doc_ids: Optional[List[str]] = None,
-    top_k: int = 10,
-    top_k_per_doc: int = 20,
-    routing: bool = True,
-    router_model: str = "qwen3:8b",
-    enable_table_lex: bool = True,
-    preview_chars: int = 400,
-    max_docs: int = 5000,
-    rerank: bool = False,
-    rerank_model: str = "qwen3:8b",
-) -> Union[str, dict]:
-    """Search across all documents without ACL filtering."""
-    tenant_id = settings.db.tenant_id
-
-    # If doc_ids not provided, load all doc_ids for tenant
-    if not doc_ids:
-        with psycopg2.connect(settings.db.pg_dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT doc_id
-                    FROM documents
-                    WHERE tenant_id = %s
-                    ORDER BY doc_id
-                    LIMIT %s
-                    """,
-                    (tenant_id, max_docs),
-                )
-                rows = cur.fetchall()
-        doc_ids = [str(r[0]) for r in rows]
-
-    if not doc_ids:
-        return {
-            "query": query,
-            "doc_ids_input": [],
-            "doc_ids_used": [],
-            "routing": {"enabled": routing, "router_model": router_model},
-            "hits": [],
-            "note": "No documents available.",
-        }
-
-    res = _get_search_client().multi_search(
-        doc_ids=doc_ids,
-        access_map={},
-        query=query,
-        top_k=top_k,
-        top_k_per_doc=top_k_per_doc,
-        routing=routing,
-        router_model=router_model,
-        enable_table_lex=enable_table_lex,
-        tenant_id=tenant_id,
-        rerank=rerank,
-        rerank_model=rerank_model,
-    )
-    
-    hits = res.get("hits", []) or []
-    
-    if rerank:
-        hits = res.get("rerank_hits", hits) or hits
-        
-    # add url to hits
-    for h in hits:
-        doc_id = getattr(h, "doc_id", None)
-        if doc_id:
-            doc_url = _get_search_client()._get_hit_url(doc_id)
-            setattr(h, "doc_url", doc_url)
-    
-    hits_string = _get_search_client().format_context(hits, max_chars_per_hit=1800)
-    return hits_string
-
-@mcp.tool(
-    name="rag_search_open_hits_string",
-    description="Cross-doc retrieval without ACL filtering. Searches all documents.",
-)
-def rag_search_open_hitstring(
-    query: str,
-    doc_ids: Optional[List[str]] = None,
-    top_k: int = 10,
-    top_k_per_doc: int = 20,
-    routing: bool = True,
-    router_model: str = "qwen3:8b",
-    enable_table_lex: bool = True,
-    preview_chars: int = 400,
-    max_docs: int = 5000,
-    rerank: bool = False,
-    rerank_model: str = "qwen3:8b",
-) -> Union[str, dict]:
-    return _rag_search_open_hitstring_impl(
-        query=query,
-        doc_ids=doc_ids,
-        top_k=top_k,
-        top_k_per_doc=top_k_per_doc,
-        routing=routing,
-        router_model=router_model,
-        enable_table_lex=enable_table_lex,
-        preview_chars=preview_chars,
-        max_docs=max_docs,
-        rerank=rerank,
-        rerank_model=rerank_model,
-    )
 
 # 檢查模型答案生成的正確性
 @mcp.tool(
@@ -481,7 +263,7 @@ def rag_gen_check(
     answer: str,
     #hits: List[Dict[str, Any]],
     hits: str,
-    model: str = "qwen3:8b",
+    model: str = settings.models.chat_model,
     timeout: int = 120,
 ) -> str:
     system = (

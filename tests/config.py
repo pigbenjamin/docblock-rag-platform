@@ -19,20 +19,18 @@ def _url(local_port: int, node_port: int) -> str:
 
 # ── 服務 URL ─────────────────────────────────────────────────
 RETRIEVE_API    = os.getenv("RETRIEVE_API",    f"http://{_NODE}:31761" if _K8S else "http://localhost:8761")
-ADMIN_API       = os.getenv("ADMIN_API",       f"http://{_NODE}:31765" if _K8S else "http://localhost:8765")
+DOCUMENT_API    = os.getenv("DOCUMENT_API",    f"http://{_NODE}:31765" if _K8S else "http://localhost:8765")
 INGEST_WORKER   = os.getenv("INGEST_WORKER",   f"http://{_NODE}:31762" if _K8S else "http://localhost:8762")
 WEBHOOK_SERVICE = os.getenv("WEBHOOK_SERVICE", f"http://{_NODE}:31763" if _K8S else "http://localhost:8763")
-MARKER_SERVICE  = os.getenv("MARKER_SERVICE",  f"http://{_NODE}:30400" if _K8S else "http://localhost:8766")  # k8s: no NodePort, access via LITELLM_PROXY
 LITELLM_PROXY   = os.getenv("LITELLM_PROXY",   f"http://{_NODE}:30400")
-NOSTR_PROXY     = os.getenv("NOSTR_PROXY",     f"http://{_NODE}:31800" if _K8S else "http://localhost:8800")
 
 # ── 密鑰 ─────────────────────────────────────────────────────
 ACL_ADMIN_SECRET = os.getenv("ACL_ADMIN_SECRET", "acl-admin-secret-changeme" if _K8S else "dev-secret-change-me")
 WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET",   "dev-webhook-secret")
 
-# ── Timeout（k8s 走 Nostr 路徑比直連慢，需要更長 timeout）──────
-TIMEOUT_SCALE  = 1                   # 統一倍數（nostr 路徑兩邊一樣慢）
-SEARCH_TIMEOUT = 120                 # 搜尋（含 embed + routing，nostr 路徑需要）
+# ── Timeout ─────────────────────────────────────────────────
+TIMEOUT_SCALE  = 1                   # 統一倍數
+SEARCH_TIMEOUT = 120                 # 搜尋（含 embed + routing）
 ACL_TIMEOUT    = 120                 # ACL 搜尋驗證
 RAG_TIMEOUT    = 300                 # RAG 問答生成
 

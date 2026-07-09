@@ -1,5 +1,8 @@
 """
-重新計算所有 chunks 的 embedding（從 1024-dim 遷移到 4096-dim）
+重新計算所有 chunks 的 embedding（更換 embedding model / 維度後使用，
+例如遷移到 embeddinggemma-300m 的 768-dim）
+只處理 embedding IS NULL 的列；換模型時請先跑 scripts/migrate_embedding_768.sql
+（會清空舊向量並調整欄位維度）。
 Usage:
   LITELLM_BASE_URL=http://10.90.20.55:31800 \
   LITELLM_API_KEY=sk-litellm-internal \
@@ -16,7 +19,8 @@ import time
 PG_DSN        = os.environ["PG_DSN"]
 LITELLM_URL   = os.environ.get("LITELLM_BASE_URL", "http://10.90.20.55:31800")
 LITELLM_KEY   = os.environ.get("LITELLM_API_KEY",  "sk-litellm-internal")
-EMBED_MODEL   = os.environ.get("EMBED_MODEL",       "qwen3-embedding")
+EMBED_MODEL   = os.environ.get("EMBED_MODEL",       "embeddinggemma-300m")
+DOC_PREFIX    = os.environ.get("EMBED_DOC_PREFIX",  "title: none | text: ")
 BATCH_SIZE    = int(os.environ.get("BATCH_SIZE",    "10"))
 
 
@@ -24,7 +28,7 @@ def embed(texts: list[str]) -> list[list[float]]:
     r = requests.post(
         f"{LITELLM_URL}/v1/embeddings",
         headers={"Authorization": f"Bearer {LITELLM_KEY}"},
-        json={"model": EMBED_MODEL, "input": texts},
+        json={"model": EMBED_MODEL, "input": [DOC_PREFIX + t for t in texts]},
         timeout=120,
     )
     r.raise_for_status()

@@ -9,6 +9,7 @@ import textwrap
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
+from docblock_core.config import settings
 from docblock_core.logging_utils import get_file_logger
 from docblock_core.md_semantic_chunk_plus import md_semantic_chunker
 from docblock_core.jobs import sha256_text
@@ -217,15 +218,18 @@ def ollama_struct_image(
 {surrounding_text}
 """.strip()
 
+    from docblock_core.llm_http import litellm_headers
+
+    endpoint = f"{url.rstrip('/')}/v1/chat/completions"
     payload = {
         "model": model,
-        "prompt": prompt,
+        "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        "options": {"temperature": 0.0},
+        "temperature": 0.0,
     }
-    r = requests.post(url, json=payload, timeout=timeout)
+    r = requests.post(endpoint, json=payload, headers=litellm_headers(), timeout=timeout)
     r.raise_for_status()
-    raw = r.json().get("response", "").strip()
+    raw = ((r.json().get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
 
     try:
         data = json.loads(raw)
@@ -269,17 +273,21 @@ def build_blocks(
     *,
     fixed_md: str,
     out_json: str,
-    doc_id: str,
+    document_id: str,
+    tenant_id: str,
     source_path: str,
-    tenant_id: str | None = None,
-    document_id: str | None = None,
-    #content_sha256: str | None = None,
-    seg_model: str = "qwen3.5-9b",
+    seg_model: str = settings.models.seg_model,
     ollama_gen_url: str = "http://localhost:4000",
     infer_table_capabilities: bool = True,
     summarize_tables: bool = False,
     capabilities_model: Optional[str] = None,
     log_path: Optional[str] = None,
+    title: Optional[str] = None,
+    original_filename: Optional[str] = None,
+    file_size: Optional[int] = None,
+    mime_type: Optional[str] = None,
+    external_ref: Optional[str] = None,
+    created_by: Optional[str] = None,
 ) -> str:
     """
     Build chunk_block.json from fixed_md.
@@ -291,10 +299,14 @@ def build_blocks(
           "tenant_id": "...",
           "document_id": "...",
           "content_sha256": "...",
-          "doc_id": "...",
           "source_path": "...",
           "md_path": "...",
-          "title": null
+          "title": null,
+          "original_filename": null,
+          "file_size": null,
+          "mime_type": null,
+          "external_ref": null,
+          "created_by": null
         },
         "blocks": [...]
       }
@@ -304,7 +316,7 @@ def build_blocks(
 
     # Calculate content_sha256 for doc metadata
     content_sha256 = sha256_text(read_text(md_path))
-    
+
     logger = get_file_logger("core.chunk_builder", log_path) if log_path else None
     if logger:
         logger.info("build_blocks md=%s out_json=%s document_id=%s", md_path, out_json, document_id)
@@ -317,7 +329,7 @@ def build_blocks(
         output_path=chunks_out,
         seg_model=seg_model,
         ollama_gen_url=ollama_gen_url,
-        doc_id=doc_id or Path(md_path).name,
+        document_id=document_id,
         source_path=source_path or md_path,
         summarize_tables=bool(summarize_tables),
         summary_model=capabilities_model or seg_model,
@@ -332,13 +344,17 @@ def build_blocks(
     bundle: Dict[str, Any] = {
         "version": "2.0",
         "doc": {
-            "doc_id": doc_id,
             "tenant_id": tenant_id,
             "document_id": document_id,
             "content_sha256": content_sha256,
             "source_path": source_path or md_path,
             "md_path": md_path,
-            "title": None,
+            "title": title,
+            "original_filename": original_filename,
+            "file_size": file_size,
+            "mime_type": mime_type,
+            "external_ref": external_ref,
+            "created_by": created_by,
         },
         "blocks": [],
     }
@@ -362,7 +378,7 @@ def build_blocks(
             lexical_text = None
             payload = {"text": c.get("text") or ""}
 
-        block_id = sha1(f"{bundle['doc']['doc_id']}|{block_type}|{idx}|{c.get('start')}|{c.get('end')}")
+        block_id = sha1(f"{bundle['doc']['document_id']}|{block_type}|{idx}|{c.get('start')}|{c.get('end')}")
 
         bundle["blocks"].append(
             {
@@ -405,7 +421,7 @@ def build_blocks(
         ).strip()
 
         chunk_index = base + i
-        block_id = sha1(f"{bundle['doc']['doc_id']}|image|{chunk_index}|{img_abs}")
+        block_id = sha1(f"{bundle['doc']['document_id']}|image|{chunk_index}|{img_abs}")
 
         bundle["blocks"].append(
             {
@@ -439,30 +455,3 @@ def build_blocks(
     if logger:
         logger.info("done build_blocks blocks=%d out=%s", len(bundle["blocks"]), out_json)
     return out_json
-
-
-# Backward-compatible alias (optional)
-def build_chunk_blocks(
-    fixed_md: str,
-    out_json: str,
-    doc_id: str,
-    source_path: str,
-    seg_model: str = "qwen3.5-9b",
-    ollama_gen_url: str = "http://localhost:4000",
-    infer_table_capabilities: bool = True,
-    capabilities_model: Optional[str] = None,
-    summarize_tables: bool = False,
-) -> str:
-    # legacy signature adapter
-    return build_blocks(
-        fixed_md=fixed_md,
-        out_json=out_json,
-        doc_id=doc_id,
-        source_path=source_path,
-        seg_model=seg_model,
-        ollama_gen_url=ollama_gen_url,
-        infer_table_capabilities=infer_table_capabilities,
-        capabilities_model=capabilities_model,
-        summarize_tables=summarize_tables,
-        log_path=None,
-    )

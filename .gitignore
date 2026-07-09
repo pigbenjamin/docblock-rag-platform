@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# K8s secrets manifest (contains plaintext credentials)
+deployments/k8s/01-secrets.yaml
+
 # Python
 __pycache__/
 *.pyc

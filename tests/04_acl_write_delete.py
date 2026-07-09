@@ -23,7 +23,7 @@ rules = [
     {"principal_type": "user",       "principal_id": USERS["u004"], "effect": "deny"},
 ]
 r = requests.post(
-    f"{ADMIN_API}/v1/acl/write-map",
+    f"{DOCUMENT_API}/v1/acl/write-map",
     headers=ACL_HEADERS,
     json={"document_id": DOC_UUID, "access_rules": rules},
     timeout=ACL_TIMEOUT,
@@ -49,14 +49,14 @@ cases = [
 for user_id, label, expected_access in cases:
     r = requests.post(
         f"{RETRIEVE_API}/v1/search",
-        json={"query": "IT OT 網路", "user_id": user_id, "doc_ids": [DOC_ID], "top_k": 5},
+        json={"query": "IT OT 網路", "user_id": user_id, "document_ids": [DOC_UUID], "top_k": 5},
         timeout=ACL_TIMEOUT,
     )
     if r.status_code != 200:
         fail(f"search({label}) → HTTP {r.status_code}")
         continue
     data   = r.json()
-    access = data.get("access", {}).get(DOC_ID, "deny")  # 無 access 欄位 = 被拒
+    access = data.get("access", {}).get(DOC_UUID, "deny")  # 無 access 欄位 = 被拒
     hits   = len(data.get("hits", []))
 
     if access == expected_access:
@@ -71,7 +71,7 @@ principals_to_delete = [
     f"user:{USERS['u004']}",
 ]
 r = requests.post(
-    f"{ADMIN_API}/v1/acl/delete-map",
+    f"{DOCUMENT_API}/v1/acl/delete-map",
     headers=ACL_HEADERS,
     json={"document_id": DOC_UUID, "principals": principals_to_delete},
     timeout=ACL_TIMEOUT,
@@ -89,11 +89,11 @@ else:
 info("搜尋驗證 delete-map 效果（dept-B 用戶應變 deny）")
 r = requests.post(
     f"{RETRIEVE_API}/v1/search",
-    json={"query": "IT OT 網路", "user_id": USERS["u003"], "doc_ids": [DOC_ID], "top_k": 5},
+    json={"query": "IT OT 網路", "user_id": USERS["u003"], "document_ids": [DOC_UUID], "top_k": 5},
     timeout=ACL_TIMEOUT,
 )
 if r.status_code == 200:
-    access = r.json().get("access", {}).get(DOC_ID, "deny")
+    access = r.json().get("access", {}).get(DOC_UUID, "deny")
     if access == "deny":
         ok(f"刪除後 dept-B 用戶 access={access}（正確）")
     else:
@@ -104,7 +104,7 @@ else:
 # ── 5. 還原：重設為 dept-A=detail 只保留一條 ─────────────────
 info("還原 ACL（只保留 dept-A=detail）")
 r = requests.post(
-    f"{ADMIN_API}/v1/acl/write-map",
+    f"{DOCUMENT_API}/v1/acl/write-map",
     headers=ACL_HEADERS,
     json={
         "document_id": DOC_UUID,

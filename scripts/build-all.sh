@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PUSH=${1:-}
 
-services=(webhook-service retrieve-api ingest-worker admin-api)
+services=(webhook-service retrieve-api ingest-worker document-api)
 
 for svc in "${services[@]}"; do
     echo "▶ Building $svc ..."

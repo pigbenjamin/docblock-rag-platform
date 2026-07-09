@@ -59,7 +59,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # marker/pdf-to-md 走 k8s litellm-service（直連，不走 Nostr 避免 timeout）
+      # marker/pdf-to-md 走外部 LiteLLM（直連）
       LITELLM_PROXY_URL: http://10.90.20.55:30400
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -71,11 +71,11 @@ services:
       postgres:
         condition: service_healthy
 
-  # ── Admin API ─────────────────────────────
-  admin-api:
+  # ── Document API ───────────────────────────
+  document-api:
     build:
       context: ../..
-      dockerfile: services/admin-api/Dockerfile
+      dockerfile: services/document-api/Dockerfile
     restart: unless-stopped
     env_file: .env
     extra_hosts:
@@ -90,35 +90,5 @@ services:
       ingest-worker:
         condition: service_started
 
-  # ── Nostr Proxy (embedding / rerank / chat via Nostr) ─────────
-  nostr-proxy:
-    build:
-      context: ../..
-      dockerfile: services/nostr-proxy/Dockerfile
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      PYTHONUNBUFFERED: "1"
-    ports:
-      - "8800:8800"
-
-  # ── Nostr Consumer (relay subscriber → LiteLLM) ───────────────
-  nostr-consumer:
-    build:
-      context: ../..
-      dockerfile: services/nostr-consumer/Dockerfile
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      # consumer 直連 k8s litellm-service（embedding/rerank/chat/marker 全部由此路由）
-      LITELLM_BASE_URL: http://10.90.20.55:30400
-      PYTHONUNBUFFERED: "1"
-    volumes:
-      - nostr_consumer_data:/app/data
-    stop_grace_period: 15s
-    depends_on:
-      - nostr-proxy
-
 volumes:
   postgres_data:
-  nostr_consumer_data:

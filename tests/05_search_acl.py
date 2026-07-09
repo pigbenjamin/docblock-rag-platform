@@ -24,6 +24,7 @@ from config import *
 header("05  ACL Search — 多用戶存取層級驗證")
 
 TARGET_DOC = "test-eurfood"
+TARGET_UUID = EXISTING_DOCS[TARGET_DOC]
 QUERY      = "European food regulation"
 
 # (user_key, 描述, 預期 access, 是否預期有 hits)
@@ -42,7 +43,7 @@ for user_key, label, expected_access, expect_hits in test_cases:
         json={
             "query":   QUERY,
             "user_id": user_id,
-            "doc_ids": [TARGET_DOC],
+            "document_ids": [TARGET_UUID],
             "top_k":   5,
         },
         timeout=SEARCH_TIMEOUT,
@@ -52,7 +53,7 @@ for user_key, label, expected_access, expect_hits in test_cases:
         continue
 
     data    = r.json()
-    access  = data.get("access", {}).get(TARGET_DOC, "unknown")
+    access  = data.get("access", {}).get(TARGET_UUID, "unknown")
     hits    = data.get("hits", [])
     n_hits  = len(hits)
     sources = list({h["source"] for h in hits})

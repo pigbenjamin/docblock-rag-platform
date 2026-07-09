@@ -30,14 +30,10 @@ fi
 echo ""
 echo ">>> 停止 Deployments ..."
 DEPLOYMENTS=(
-  nostr-consumer
-  nostr-proxy
   retrieve-api
   webhook-service
-  admin-api
+  document-api
   ingest-worker
-  marker-service
-  litellm-proxy
 )
 
 for DEPLOY in "${DEPLOYMENTS[@]}"; do
@@ -57,7 +53,7 @@ if ${PURGE}; then
   echo ""
   echo ">>> 刪除 PVC / PV ..."
   kubectl delete pvc --all -n "${NAMESPACE}" --ignore-not-found
-  kubectl delete pv docblock-ingest-pv docblock-consumer-pv --ignore-not-found
+  kubectl delete pv docblock-ingest-pv --ignore-not-found
 
   echo ""
   echo ">>> 刪除 Secrets / ConfigMap ..."
@@ -73,7 +69,6 @@ if ${PURGE}; then
   echo "  完全清除完成"
   echo "  ⚠️  hostPath 目錄資料仍保留於："
   echo "    /home/ai-x/data/docblock/ingest"
-  echo "    /home/ai-x/data/docblock/consumer"
   echo "  若需清除請手動執行："
   echo "    rm -rf /home/ai-x/data/docblock"
   echo "================================================"

@@ -6,7 +6,7 @@ from app.routers.documents import router as documents_router
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Docblock Admin API")
+    app = FastAPI(title="Docblock Document API")
 
     app.include_router(documents_router, prefix="/v1")
     app.include_router(acl_router, prefix="/v1")

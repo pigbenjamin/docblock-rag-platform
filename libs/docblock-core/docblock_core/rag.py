@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 import requests
+from docblock_core.llm_http import litellm_headers
 
 from docblock_core.config import settings
 from docblock_core.search import DocblockSearchClient, SearchHit
@@ -47,7 +48,7 @@ class RagClient:
     """
     RAG generation client:
       - retrieval via DocblockSearchClient
-      - generation via Ollama /api/chat
+      - generation via OpenAI /v1/chat/completions (LiteLLM)
     """
 
     def __init__(
@@ -72,7 +73,7 @@ class RagClient:
     def generate(
         self,
         *,
-        doc_id: str,
+        document_id: str,
         question: str,
         top_k: int = 10,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
@@ -80,11 +81,11 @@ class RagClient:
         enable_table_lex: bool = True,
         max_chars_per_hit: int = 1800,
         routing: bool = True,
-        router_model: str = "qwen3.5-9b",
+        router_model: str = settings.models.chat_model,
     ) -> RagAnswer:
         # 1) Retrieve
         hits = self.search_client.search(
-            doc_id=doc_id,
+            document_id=document_id,
             query=question,
             top_k=top_k,
             enable_table_lex=enable_table_lex,
@@ -107,7 +108,7 @@ class RagClient:
             ],
             "stream": False,
         }
-        r = requests.post(url, json=payload, timeout=self.chat_timeout)
+        r = requests.post(url, json=payload, headers=litellm_headers(), timeout=self.chat_timeout)
         r.raise_for_status()
         data = r.json()
 

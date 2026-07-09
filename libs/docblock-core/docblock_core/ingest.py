@@ -15,38 +15,36 @@ from docblock_core.clip_embed import clip_image_embed, ClipEmbedder
 from docblock_core import sql_utils
 from docblock_core.gen_sum import build_document_sum_from_fix_md
 from docblock_core.config import settings
+from docblock_core.llm_http import litellm_headers
 
 def to_pg_vector_literal(vec: List[float], fmt: str = ".8f") -> str:
     return "[" + ",".join(format(float(x), fmt) for x in vec) + "]"
 
 
-def ollama_embed(text: str, *, model: str, ollama_base_url: str, timeout: int) -> List[float]:
-    """Embeddings endpoint: /api/embeddings"""
-    url = f"{ollama_base_url.rstrip('/')}/api/embeddings"
+def litellm_embed(text: str, *, model: str, ollama_base_url: str, timeout: int) -> List[float]:
+    """OpenAI-compatible embeddings endpoint: /v1/embeddings"""
+    url = f"{ollama_base_url.rstrip('/')}/v1/embeddings"
     try:
-        r = requests.post(url, json={"model": model, "prompt": text}, timeout=timeout)
+        r = requests.post(
+            url,
+            json={"model": model, "input": settings.models.embed_doc_prefix + text},
+            headers=litellm_headers(),
+            timeout=timeout,
+        )
         r.raise_for_status()
         data = r.json()
     except Exception as e:
         raise RuntimeError(f"Embedding request failed: {e}")
-    emb = data.get("embedding")
+    try:
+        emb = data["data"][0]["embedding"]
+    except (KeyError, IndexError, TypeError):
+        raise ValueError(f"Unexpected embedding response: {data}")
     if not isinstance(emb, list):
         raise ValueError(f"Unexpected embedding response: {data}")
     return emb
 
 
-def _normalize_ollama_gen_url(url: str) -> str:
-    """Accept either a base URL (http://host:11434) or a full endpoint URL."""
-    u = (url or "").strip()
-    if not u:
-        return ""
-    # If caller passed host-only URL, default to /api/generate
-    if "/api/" not in u:
-        return u.rstrip("/") + "/api/generate"
-    return u
-
-
-def ollama_generate(
+def litellm_generate(
     prompt: str,
     *,
     model: str,
@@ -54,25 +52,28 @@ def ollama_generate(
     timeout: int,
     system: Optional[str] = None,
 ) -> str:
-    """Text generation endpoint: /api/generate (or compatible)."""
-    url = _normalize_ollama_gen_url(ollama_gen_url)
-    if not url:
+    """OpenAI-compatible text generation endpoint: /v1/chat/completions"""
+    base = (ollama_gen_url or "").strip()
+    if not base:
         raise ValueError("ollama_gen_url is required for generation")
+    url = f"{base.rstrip('/')}/v1/chat/completions"
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
 
     payload: Dict[str, Any] = {
         "model": model,
-        "prompt": prompt,
+        "messages": messages,
         "stream": False,
-        "options": {"temperature": 0.2},
+        "temperature": 0.2,
     }
-    # Some models accept 'system' on /api/generate; harmless if ignored
-    if system:
-        payload["system"] = system
 
-    r = requests.post(url, json=payload, timeout=timeout)
+    r = requests.post(url, json=payload, headers=litellm_headers(), timeout=timeout)
     r.raise_for_status()
     data = r.json()
-    out = data.get("response")
+    out = (data.get("choices") or [{}])[0].get("message", {}).get("content")
     if not isinstance(out, str):
         raise ValueError(f"Unexpected generate response: {data}")
     return out.strip()
@@ -83,24 +84,29 @@ def ensure_document_version(
     *,
     tenant_id: str,
     document_id: str,
-    doc_id: str,
     source_path: str,
     md_path: str,
     title: Optional[str],
     content_sha256: str,
+    original_filename: Optional[str] = None,
+    file_size: Optional[int] = None,
+    mime_type: Optional[str] = None,
+    external_ref: Optional[str] = None,
+    created_by: Optional[str] = None,
 ) -> Tuple[str, int, bool]:
     """
-    Upsert documents by (tenant_id, doc_id) and return (document_id, active_version, content_unchanged).
+    Upsert documents by (tenant_id, document_id) and return (document_id, active_version, content_unchanged).
 
-    - If this is a new (tenant_id, doc_id), insert with active_version=1; content_unchanged=False
+    - If this is a new document_id, insert with active_version=1; content_unchanged=False
     - If already exists:
         - if content_sha256 changed -> active_version += 1; content_unchanged=False
         - else keep active_version; content_unchanged=True
       Always update paths/title/content_sha256/updated_at.
 
     Note:
-      We accept an application-provided document_id at insert time, but for existing doc_id
-      we keep the database's document_id as the canonical one.
+      The caller (admin-api at upload time) is responsible for generating a fresh
+      document_id for new uploads and passing the existing document_id when
+      re-uploading a new version of the same logical document.
     """
     # CTE captures old version before upsert so we can detect content changes
     cur.execute(
@@ -108,18 +114,24 @@ def ensure_document_version(
         WITH current AS (
           SELECT active_version AS old_version
           FROM documents
-          WHERE tenant_id = %s AND doc_id = %s
+          WHERE tenant_id = %s AND document_id = %s
         )
         INSERT INTO documents (
-          tenant_id, document_id, doc_id, source_path, md_path, title,
-          active_version, content_sha256
+          tenant_id, document_id, source_path, md_path, title,
+          original_filename, file_size, mime_type, external_ref, created_by,
+          status, active_version, content_sha256
         )
-        VALUES (%s, %s, %s, %s, %s, %s, 1, %s)
-        ON CONFLICT (tenant_id, doc_id) DO UPDATE
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'ready', 1, %s)
+        ON CONFLICT (tenant_id, document_id) DO UPDATE
         SET
           source_path = EXCLUDED.source_path,
           md_path = EXCLUDED.md_path,
           title = COALESCE(EXCLUDED.title, documents.title),
+          original_filename = COALESCE(EXCLUDED.original_filename, documents.original_filename),
+          file_size = COALESCE(EXCLUDED.file_size, documents.file_size),
+          mime_type = COALESCE(EXCLUDED.mime_type, documents.mime_type),
+          external_ref = COALESCE(EXCLUDED.external_ref, documents.external_ref),
+          status = 'ready',
           updated_at = now(),
           active_version = CASE
             WHEN documents.content_sha256 IS DISTINCT FROM EXCLUDED.content_sha256
@@ -129,15 +141,20 @@ def ensure_document_version(
           content_sha256 = EXCLUDED.content_sha256
         RETURNING document_id, active_version, (SELECT old_version FROM current)
         """,
-        (tenant_id, doc_id, tenant_id, document_id, doc_id, source_path, md_path, title, content_sha256),
+        (
+            tenant_id, document_id,
+            tenant_id, document_id, source_path, md_path, title,
+            original_filename, file_size, mime_type, external_ref, created_by,
+            content_sha256,
+        ),
     )
     row = cur.fetchone()
-    db_doc_id  = str(row[0])
+    db_document_id = str(row[0])
     new_version = int(row[1])
     old_version = row[2]  # None if brand-new document
     # content_unchanged = document existed before AND version didn't increment
     content_unchanged = (old_version is not None) and (new_version == int(old_version))
-    return db_doc_id, new_version, content_unchanged
+    return db_document_id, new_version, content_unchanged
 
 
 def _build_heuristic_summary(blocks: List[Dict[str, Any]], max_chars: int = 1800) -> str:
@@ -326,7 +343,7 @@ def generate_llm_summary_from_markdown(
         return "", {"generated_by": "llm_markdown_v0", "empty_source": True, "md_path": md_path}
 
     system, prompt = _llm_summary_prompt_from_markdown(md_text, language=language)
-    out = ollama_generate(prompt, model=model, ollama_gen_url=ollama_gen_url, timeout=timeout, system=system)
+    out = litellm_generate(prompt, model=model, ollama_gen_url=ollama_gen_url, timeout=timeout, system=system)
     out = (out or "").strip()
     return out, {
         "generated_by": "llm_markdown_v0",
@@ -350,7 +367,7 @@ def generate_llm_summary(
         return "", {"generated_by": "llm_v1", "empty_source": True}
 
     system, prompt = _llm_summary_prompt(source_text)
-    out = ollama_generate(prompt, model=model, ollama_gen_url=ollama_gen_url, timeout=timeout, system=system)
+    out = litellm_generate(prompt, model=model, ollama_gen_url=ollama_gen_url, timeout=timeout, system=system)
     out = (out or "").strip()
     return out, {"generated_by": "llm_v1", "summary_model": model, "max_source_chars": max_source_chars}
 
@@ -412,7 +429,7 @@ def ingest_to_db(
     pg_dsn: str,
     embed_model: str,
     ollama_base_url: str = "http://localhost:11434",
-    summary_model: Optional[str] = "qwen3:8b",
+    summary_model: Optional[str] = settings.models.summary_model,
     ollama_gen_url: Optional[str] = None,
     summary_timeout: int = 180,
     vision_device: str = "cuda",
@@ -427,7 +444,8 @@ def ingest_to_db(
       - tenant_id
       - document_id
       - content_sha256
-      - doc_id, source_path, md_path, title(optional)
+      - source_path, md_path, title(optional)
+      - original_filename, file_size, mime_type, external_ref, created_by (all optional)
     """
     bundle = json.loads(Path(chunk_block_json).read_text(encoding="utf-8"))
     doc = bundle["doc"]
@@ -443,7 +461,7 @@ def ingest_to_db(
         raise ValueError("chunk_block.json missing required doc fields: tenant_id/document_id/content_sha256")
 
     eff_summary_model = (summary_model or "").strip()
-    eff_ollama_gen_url = _normalize_ollama_gen_url(ollama_gen_url or "")
+    eff_ollama_gen_url = (ollama_gen_url or "").strip()
 
     conn = psycopg2.connect(pg_dsn)
     conn.autocommit = False
@@ -463,18 +481,22 @@ def ingest_to_db(
                 cur,
                 tenant_id=str(tenant_id),
                 document_id=str(document_id),
-                doc_id=str(doc["doc_id"]),
                 source_path=str(doc["source_path"]),
                 md_path=str(doc.get("md_path") or ""),
                 title=doc.get("title"),
                 content_sha256=str(content_sha256),
+                original_filename=doc.get("original_filename"),
+                file_size=doc.get("file_size"),
+                mime_type=doc.get("mime_type"),
+                external_ref=doc.get("external_ref"),
+                created_by=doc.get("created_by"),
             )
 
         if content_unchanged:
             logger.info(
                 "[ingest] content unchanged (sha256 identical), skipping re-embedding: "
-                "doc_id=%s document_id=%s version=%s",
-                doc["doc_id"], db_document_id, version,
+                "document_id=%s version=%s",
+                db_document_id, version,
             )
             conn.close()
             return
@@ -496,7 +518,7 @@ def ingest_to_db(
                 try:
                     embed_text = embed_text.strip()
                     emb = (
-                        ollama_embed(
+                        litellm_embed(
                             embed_text, model=embed_model, ollama_base_url=ollama_base_url, timeout=embed_timeout
                         )
                         if embed_text.strip()
@@ -541,7 +563,7 @@ def ingest_to_db(
                 
                 try:
                     emb = (
-                        ollama_embed(
+                        litellm_embed(
                             embed_text, model=embed_model, ollama_base_url=ollama_base_url, timeout=embed_timeout
                         )
                         if embed_text.strip()
@@ -598,7 +620,7 @@ def ingest_to_db(
 
                     embed_text = b.get("embed_text") or ""
                     bge_emb = (
-                        ollama_embed(
+                        litellm_embed(
                             embed_text, model=embed_model, ollama_base_url=ollama_base_url, timeout=embed_timeout
                         )
                         if embed_text.strip()
@@ -700,8 +722,8 @@ def ingest_to_db(
                     )
             conn.commit()
             logger.info(
-                "[ingest] cleaned up old version chunks for doc_id=%s versions < %s",
-                doc["doc_id"], version,
+                "[ingest] cleaned up old version chunks for document_id=%s versions < %s",
+                db_document_id, version,
             )
 
     except Exception:
@@ -781,12 +803,11 @@ def ingest(bundle_path: str) -> None:
 
     Required env:
       - PG_DSN
-      - OLLAMA_BASE_URL
+      - LITELLM_BASE_URL
       - EMBED_MODEL
 
     Optional env:
       - SUMMARY_MODEL          (for true summary generation)
-      - OLLAMA_GEN_URL         (base url or /api/generate url)
       - SUMMARY_TIMEOUT
       - EMBED_TIMEOUT
       - VISION_DEVICE

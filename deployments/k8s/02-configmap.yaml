@@ -6,42 +6,34 @@ metadata:
 data:
   # Tenant
   TENANT_ID: "firdi"
-
-  # DB (non-secret part)
   DOCBLOCK_TENANT_ID: "firdi"
 
-  # LLM routing (retrieve-api → nostr-proxy → Nostr → LiteLLM)
-  LITELLM_BASE_URL:  "http://nostr-proxy:8800"
-  OLLAMA_BASE_URL:   "http://nostr-proxy:8800"
-  OLLAMA_DIRECT_URL: "http://10.90.20.55:11434"
+  # LLM 路由（所有服務直連外部 LiteLLM，含 marker/pdf-to-md）
+  LITELLM_BASE_URL:  "http://10.90.20.55:30400"
+  LITELLM_PROXY_URL: "http://10.90.20.55:30400"
 
-  # Nostr
-  RELAY_URL: "wss://10.90.20.55:9443/"
-  EMBED_VIA_NOSTR:  "true"
-  RERANK_VIA_NOSTR: "true"
-  CHAT_VIA_NOSTR:   "true"
-
-  # Models
-  EMBED_MODEL:    "qwen3-embedding"
-  RERANK_MODEL:   "qwen3-reranker"
-  SEG_MODEL:      "qwen3.5-9b"
-  SUMMARY_MODEL:  "qwen3.5-9b"
-  CHAT_MODEL:     "qwen3.5-9b"
+  # Models（名稱需與外部 LiteLLM 一致，見 firdi-litellm README「可用模型」）
+  EMBED_MODEL:    "embeddinggemma-300m"
+  # EmbeddingGemma task prompts（serving 端已自動加前綴時設成空字串）
+  EMBED_QUERY_PREFIX: "task: search result | query: "
+  EMBED_DOC_PREFIX:   "title: none | text: "
+  # rerank 服務已於 2026-07 自 LiteLLM 移除；留空時 rerank 失敗自動 fallback 原始排序
+  RERANK_MODEL:   ""
+  SEG_MODEL:      "gemma-4-26B-A4B-it"
+  SUMMARY_MODEL:  "gemma-4-26B-A4B-it"
+  CHAT_MODEL:     "gemma-4-26B-A4B-it"
+  CAPABILITIES_MODEL: "gemma-4-26B-A4B-it"
 
   # Internal service URLs
-  INGEST_WORKER_URL:    "http://ingest-worker:8762"
-  MARKER_SERVICE_URL:   "http://marker-service:8766"
-  LITELLM_PROXY_URL:    "http://litellm-proxy:4000"
+  INGEST_WORKER_URL: "http://ingest-worker:8762"
 
-  # Keycloak (使用 host IP，pod 內無法用 localhost)
-  KEYCLOAK_URL:       "http://10.90.20.55:8088"
-  KEYCLOAK_REALM:     "firdi"
-  KEYCLOAK_CLIENT_ID: "docblock"
+  # Keycloak（使用 host IP，pod 內無法用 localhost；realm 名稱區分大小寫）
+  KEYCLOAK_URL:        "https://10.90.20.55:8446"
+  KEYCLOAK_REALM:      "FIRDI-AI-Platform"
+  KEYCLOAK_CLIENT_ID:  "user-sync-service"
+  KEYCLOAK_VERIFY_SSL: "false"
 
   # Python / HuggingFace
   PYTHONUNBUFFERED:     "1"
-  HF_HUB_OFFLINE:      "1"
+  HF_HUB_OFFLINE:       "1"
   TRANSFORMERS_OFFLINE: "1"
-
-  # Marker
-  MODEL_CACHE_DIR: "/datalab_cache"

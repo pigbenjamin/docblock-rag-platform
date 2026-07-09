@@ -27,19 +27,19 @@ QUERY        = "European food regulation"
 def search_access(user_id):
     r = requests.post(
         f"{RETRIEVE_API}/v1/search",
-        json={"query": QUERY, "user_id": user_id, "doc_ids": [TARGET_DOC], "top_k": 5},
+        json={"query": QUERY, "user_id": user_id, "document_ids": [TARGET_UUID], "top_k": 5},
         timeout=SEARCH_TIMEOUT,
     )
     if r.status_code != 200:
         return None, f"HTTP {r.status_code}"
     data = r.json()
-    access = data.get("access", {}).get(TARGET_DOC, "unknown")
+    access = data.get("access", {}).get(TARGET_UUID, "unknown")
     hits   = len(data.get("hits", []))
     return access, hits
 
 def write_user_rule(user_id, effect):
     r = requests.post(
-        f"{ADMIN_API}/v1/acl/write-map",
+        f"{DOCUMENT_API}/v1/acl/write-map",
         headers=ACL_HEADERS,
         json={
             "document_id": TARGET_UUID,

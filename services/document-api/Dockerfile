@@ -7,11 +7,11 @@ COPY libs/docblock-core /libs/docblock-core
 RUN pip install --no-cache-dir /libs/docblock-core
 
 # Install service dependencies
-COPY services/admin-api/requirements.txt .
+COPY services/document-api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy service source
-COPY services/admin-api/app/ ./app/
+COPY services/document-api/app/ ./app/
 
 # Shared volume for uploaded files (same mount as ingest-worker)
 VOLUME ["/data"]

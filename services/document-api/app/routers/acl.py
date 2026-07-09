@@ -6,7 +6,8 @@ from app.services.acl_service import AclService
 
 
 def verify_acl_secret(x_acl_secret: str = Header(default="")):
-    if x_acl_secret != settings.acl.admin_secret:
+    # 空 secret 一律拒絕，避免未設定環境變數時形同免驗證
+    if not settings.acl.admin_secret or x_acl_secret != settings.acl.admin_secret:
         raise HTTPException(status_code=401, detail="Invalid ACL secret")
 
 

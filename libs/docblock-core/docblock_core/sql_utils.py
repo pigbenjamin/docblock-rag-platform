@@ -29,7 +29,6 @@ __all__ = [
     "reset_serial_sequence",
     "safe_insert_document_acl",
     "upsert_document_acl",
-    "fetch_document_id_by_docid",
     "document_exists",
     "insert_text_chunks",
     "insert_table_chunks",
@@ -297,20 +296,6 @@ def upsert_document_sum(
                         retrieval_embedding,
                 ),
         )
-
-
-# for user principal management in keycloak webhook and docblock-rag app
-def fetch_document_id_by_docid(cur, tenant_id: str, doc_id: str) -> Optional[str]:
-    """Resolve a human-friendly `doc_id` to the canonical `document_id` UUID.
-
-    Returns the UUID string or None if not found.
-    """
-    cur.execute(
-        "SELECT document_id FROM documents WHERE tenant_id = %s AND doc_id = %s LIMIT 1",
-        (tenant_id, doc_id),
-    )
-    row = cur.fetchone()
-    return str(row[0]) if row else None
 
 
 # for document acl in webhook

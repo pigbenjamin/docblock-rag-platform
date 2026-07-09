@@ -16,16 +16,17 @@ header("08  RAG Answer")
 
 # ── 1. 有 detail 存取：u001 問 test-eurfood ───────────────────
 TARGET_DOC = "test-eurfood"
+TARGET_UUID = EXISTING_DOCS[TARGET_DOC]
 USER_WITH_ACCESS = USERS["u001"]    # dept-A=detail
 USER_NO_ACCESS   = USERS["u002"]    # deny
 
 QUESTION = "What are the main food safety regulations in this document?"
 
-info(f"POST /v1/answer  doc_id={TARGET_DOC}  user=u001（detail access）")
+info(f"POST /v1/answer  document_id={TARGET_UUID}  user=u001（detail access）")
 r = requests.post(
     f"{RETRIEVE_API}/v1/answer",
     json={
-        "doc_id":   TARGET_DOC,
+        "document_id": TARGET_UUID,
         "question": QUESTION,
         "user_id":  USER_WITH_ACCESS,
         "top_k":    5,
@@ -59,11 +60,11 @@ else:
         fail(f"context 格式異常：{context[:100]!r}")
 
 # ── 2. 無存取權限：u002（deny）問同一份文件 ─────────────────
-info(f"POST /v1/answer  doc_id={TARGET_DOC}  user=u002（deny access）")
+info(f"POST /v1/answer  document_id={TARGET_UUID}  user=u002（deny access）")
 r = requests.post(
     f"{RETRIEVE_API}/v1/answer",
     json={
-        "doc_id":   TARGET_DOC,
+        "document_id": TARGET_UUID,
         "question": QUESTION,
         "user_id":  USER_NO_ACCESS,
         "top_k":    5,
@@ -87,13 +88,14 @@ else:
 
 # ── 3. 有 detail 存取：u001 問 deptA_IT-OT_Network_Policy ──────
 TARGET_DOC2 = "deptA_IT-OT_Network_Policy"
+TARGET_UUID2 = EXISTING_DOCS[TARGET_DOC2]
 QUESTION2   = "What is the IT/OT network isolation policy?"
 
-info(f"POST /v1/answer  doc_id={TARGET_DOC2}  user=u001（dept-A=detail）")
+info(f"POST /v1/answer  document_id={TARGET_UUID2}  user=u001（dept-A=detail）")
 r = requests.post(
     f"{RETRIEVE_API}/v1/answer",
     json={
-        "doc_id":   TARGET_DOC2,
+        "document_id": TARGET_UUID2,
         "question": QUESTION2,
         "user_id":  USER_WITH_ACCESS,
         "top_k":    5,

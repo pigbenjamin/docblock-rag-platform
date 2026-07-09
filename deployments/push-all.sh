@@ -25,12 +25,9 @@ SHA=$(git rev-parse --short HEAD)
 export DOCKER_CONFIG="${DOCKER_CONFIG:-${HOME}/.docker-km}"
 
 ALL_SERVICES=(
-  nostr-proxy
-  nostr-consumer
   retrieve-api
-  admin-api
+  document-api
   ingest-worker
-  marker-service
   webhook-service
 )
 

@@ -9,16 +9,23 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- =========================================================
--- 01_documents.sql  (B方案 + version + content_sha256)
+-- 01_documents.sql  (document_id 為唯一識別碼 + version + content_sha256)
 -- =========================================================
 CREATE TABLE IF NOT EXISTS documents (
   tenant_id      TEXT NOT NULL,
-  document_id    UUID NOT NULL,                  -- 上傳/ingest 時由應用端提供（不在DB default）
+  document_id    UUID NOT NULL,                  -- 唯一識別碼，上傳時由應用端生成（不在DB default）
 
-  doc_id         TEXT NOT NULL,                  -- 邏輯代碼（tenant內唯一）
   source_path    TEXT NOT NULL,
   md_path        TEXT,
   title          TEXT,
+  original_filename TEXT,                        -- 使用者上傳時的原始檔名
+  file_size      BIGINT,                          -- bytes
+  mime_type      TEXT,
+  external_ref   TEXT,                            -- 選填：外部系統代碼（如 Outline），僅供參考，不參與唯一性/版本判斷
+
+  created_by     UUID,                            -- 上傳者 user_id（Keycloak sub）
+  status         TEXT NOT NULL DEFAULT 'ready'    -- processing | ready | failed
+                   CHECK (status IN ('processing', 'ready', 'failed')),
 
   active_version INT  NOT NULL DEFAULT 1,        -- 目前啟用版本
   content_sha256 TEXT NOT NULL,                  -- 原始檔 bytes 的 sha256 (hex)
@@ -26,8 +33,7 @@ CREATE TABLE IF NOT EXISTS documents (
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
 
   CONSTRAINT pk_documents PRIMARY KEY (document_id),
-  CONSTRAINT uq_documents_tenant_document UNIQUE (tenant_id, document_id),
-  CONSTRAINT uq_documents_tenant_docid UNIQUE (tenant_id, doc_id)
+  CONSTRAINT uq_documents_tenant_document UNIQUE (tenant_id, document_id)
 
   -- 可選：若你要同一路徑視為同一份文件（通常建議打開）
   -- ,CONSTRAINT uq_documents_tenant_source UNIQUE (tenant_id, source_path)
@@ -36,14 +42,17 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS idx_documents_tenant
   ON documents(tenant_id);
 
-CREATE INDEX IF NOT EXISTS idx_documents_tenant_docid
-  ON documents(tenant_id, doc_id);
-
 CREATE INDEX IF NOT EXISTS idx_documents_tenant_source
   ON documents(tenant_id, source_path);
 
 CREATE INDEX IF NOT EXISTS idx_documents_tenant_sha
   ON documents(tenant_id, content_sha256);
+
+CREATE INDEX IF NOT EXISTS idx_documents_tenant_external_ref
+  ON documents(tenant_id, external_ref) WHERE external_ref IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_documents_created_by
+  ON documents(tenant_id, created_by);
 
 -- =========================================================
 -- =========================================================
@@ -63,7 +72,7 @@ CREATE TABLE IF NOT EXISTS text_chunks (
   content      TEXT NOT NULL,
   metadata     JSONB NOT NULL DEFAULT '{}'::jsonb,
   embed_text   TEXT NOT NULL,
-  embedding    vector(1024),
+  embedding    vector(768),
   created_at   TIMESTAMPTZ DEFAULT now(),
 
   CONSTRAINT fk_text_chunks_document
@@ -111,7 +120,7 @@ CREATE TABLE IF NOT EXISTS table_chunks (
   tsv              tsvector GENERATED ALWAYS AS (to_tsvector('simple', lexical_text)) STORED,
 
   metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
-  embedding        vector(1024),
+  embedding        vector(768),
   created_at       TIMESTAMPTZ DEFAULT now(),
 
   CONSTRAINT fk_table_chunks_document
@@ -161,14 +170,14 @@ CREATE TABLE IF NOT EXISTS image_chunks (
   image_caption  TEXT,
   image_struct   JSONB,
 
-  embed_text     TEXT NOT NULL,                  -- bge-m3 embedding source (caption + surrounding)
+  embed_text     TEXT NOT NULL,                  -- text embedding source (caption + surrounding)
   metadata       JSONB NOT NULL DEFAULT '{}'::jsonb,
 
   -- CLIP image embedding for cross-modal retrieval
   clip_embedding vector(768),
 
-  -- optional: bge-m3 embedding for normal text retrieval
-  text_embedding vector(1024),
+  -- optional: text embedding for normal text retrieval
+  text_embedding vector(768),
 
   created_at     TIMESTAMPTZ DEFAULT now(),
 
@@ -322,7 +331,7 @@ CREATE TABLE IF NOT EXISTS summary_chunks (
   metadata      jsonb NOT NULL DEFAULT '{}'::jsonb,
 
   -- for vector search
-  embedding     vector(1024),
+  embedding     vector(768),
 
   updated_at    timestamptz NOT NULL DEFAULT now(),
 
@@ -375,8 +384,8 @@ CREATE TABLE IF NOT EXISTS document_sum (
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
 
   -- 向量
-  retrieval_embedding vector(1024),
-  summary_embedding   vector(1024),
+  retrieval_embedding vector(768),
+  summary_embedding   vector(768),
 
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -407,3 +416,36 @@ CREATE INDEX IF NOT EXISTS idx_document_sum_tsv
 -- Optional: 向量索引（若你之後真的會用 summary 向量召回）
 CREATE INDEX IF NOT EXISTS idx_document_sum_retrieval_emb_hnsw
   ON document_sum USING hnsw (retrieval_embedding vector_cosine_ops);
+
+
+-- =========================================
+-- 09_ingest_jobs: 持久化的上傳/ingest pipeline 任務狀態
+-- =========================================
+-- 取代 ingest-worker 原本的記憶體內 _jobs dict，重啟不遺失狀態。
+-- document_id 不設 FK：job 建立時（admin-api 產生 document_id 當下）
+-- documents row 通常還沒寫入，要等 ingest 階段才 INSERT。
+
+CREATE TABLE IF NOT EXISTS ingest_jobs (
+  job_id       UUID NOT NULL,
+  tenant_id    TEXT NOT NULL,
+  document_id  UUID NOT NULL,
+
+  source_type  TEXT NOT NULL DEFAULT 'pdf',       -- pdf | md | docx | xlsx | pptx（供未來格式路由使用）
+  stage        TEXT NOT NULL DEFAULT 'pending',   -- pending | marker | build_chunks | ingest | done | failed
+  status       TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending', 'running', 'done', 'failed')),
+  detail       TEXT,                              -- 人類可讀訊息 / 錯誤內容
+
+  created_by   UUID,                               -- 上傳者 user_id
+
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT pk_ingest_jobs PRIMARY KEY (job_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingest_jobs_tenant_document
+  ON ingest_jobs(tenant_id, document_id);
+
+CREATE INDEX IF NOT EXISTS idx_ingest_jobs_status
+  ON ingest_jobs(tenant_id, status);

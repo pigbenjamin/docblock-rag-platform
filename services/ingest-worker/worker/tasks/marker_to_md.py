@@ -9,10 +9,10 @@ import httpx
 from docblock_core.config import settings
 
 
-def run_marker_to_md(job_id: str, doc_id: str, pdf_path: str, out_dir: str) -> str:
-    """Call marker-service via LiteLLM proxy to convert PDF → Markdown.
+def run_marker_to_md(job_id: str, document_id: str, pdf_path: str, out_dir: str) -> str:
+    """Call the marker/pdf-to-md LiteLLM route (external) to convert PDF → Markdown.
 
-    Returns the output .md file path produced by marker-service.
+    Returns the output .md file path.
     """
     proxy_url = settings.tools.litellm_proxy_url
     payload = {
@@ -21,7 +21,7 @@ def run_marker_to_md(job_id: str, doc_id: str, pdf_path: str, out_dir: str) -> s
             "role": "user",
             "content": json.dumps({
                 "pdf_path": pdf_path,
-                "doc_id": doc_id,
+                "document_id": document_id,
                 "out_dir": out_dir,
                 "job_id": job_id,
             }),

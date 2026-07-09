@@ -64,7 +64,7 @@ cd /home/ai-x/km/repo/docblock-rag-platform
 ```bash
 source ~/.secrets
 SHA=$(git rev-parse --short HEAD)
-SERVICE=nostr-consumer   # 改成目標 service
+SERVICE=retrieve-api   # 改成目標 service
 
 docker build -f services/${SERVICE}/Dockerfile \
   -t ghcr.io/pigbenjamin/docblock-rag-platform/${SERVICE}:latest \
@@ -114,7 +114,7 @@ kubectl create secret docker-registry pigbenjamin-ghcr-secret \
 ## 確認 Image 是否已推上 GHCR
 
 ```bash
-for SVC in nostr-proxy nostr-consumer retrieve-api admin-api ingest-worker marker-service webhook-service; do
+for SVC in retrieve-api document-api ingest-worker webhook-service; do
   if DOCKER_CONFIG=~/.docker-km docker manifest inspect \
     ghcr.io/pigbenjamin/docblock-rag-platform/${SVC}:latest > /dev/null 2>&1; then
     echo "✅ ${SVC}"

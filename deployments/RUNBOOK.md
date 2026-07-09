@@ -42,11 +42,8 @@
   NO_CACHE     : off
 ================================================
 
->>> Building nostr-proxy ...
-✅ nostr-proxy done
-
->>> Building nostr-consumer ...
-✅ nostr-consumer done
+>>> Building retrieve-api ...
+✅ retrieve-api done
 ...
 ================================================
   All services built successfully ✓
@@ -75,7 +72,7 @@ source ~/.secrets
 ```bash
 export OWNER=your-github-username
 SHA=$(git rev-parse --short HEAD)
-SERVICE=nostr-consumer   # 改成目標 service
+SERVICE=retrieve-api   # 改成目標 service
 
 docker build -f services/${SERVICE}/Dockerfile \
   -t ghcr.io/${OWNER}/docblock-rag-platform/${SERVICE}:latest \
@@ -110,23 +107,14 @@ IMAGE_PREFIX=${REGISTRY}/${OWNER}/${REPO}
 ```bash
 cd /path/to/docblock-rag-platform
 
-# nostr-proxy
-docker build -f services/nostr-proxy/Dockerfile -t ${IMAGE_PREFIX}/nostr-proxy:latest .
-
-# nostr-consumer
-docker build -f services/nostr-consumer/Dockerfile -t ${IMAGE_PREFIX}/nostr-consumer:latest .
-
 # retrieve-api
 docker build -f services/retrieve-api/Dockerfile -t ${IMAGE_PREFIX}/retrieve-api:latest .
 
-# admin-api
-docker build -f services/admin-api/Dockerfile -t ${IMAGE_PREFIX}/admin-api:latest .
+# document-api
+docker build -f services/document-api/Dockerfile -t ${IMAGE_PREFIX}/document-api:latest .
 
 # ingest-worker
 docker build -f services/ingest-worker/Dockerfile -t ${IMAGE_PREFIX}/ingest-worker:latest .
-
-# marker-service（較大，約 6GB，需要較長時間）
-docker build -f services/marker-service/Dockerfile -t ${IMAGE_PREFIX}/marker-service:latest .
 
 # webhook-service
 docker build -f services/webhook-service/Dockerfile -t ${IMAGE_PREFIX}/webhook-service:latest .
@@ -137,17 +125,12 @@ docker build -f services/webhook-service/Dockerfile -t ${IMAGE_PREFIX}/webhook-s
 ```bash
 cd /path/to/docblock-rag-platform
 
-for SERVICE in nostr-proxy nostr-consumer retrieve-api admin-api ingest-worker webhook-service; do
+for SERVICE in retrieve-api document-api ingest-worker webhook-service; do
   echo "=== Building ${SERVICE} ==="
   docker build -f services/${SERVICE}/Dockerfile \
     -t ${IMAGE_PREFIX}/${SERVICE}:latest \
     .
 done
-
-# marker-service 單獨執行（較慢）
-docker build -f services/marker-service/Dockerfile \
-  -t ${IMAGE_PREFIX}/marker-service:latest \
-  .
 ```
 
 ### 1.3 Build 時加上 git SHA tag（推薦）
@@ -155,9 +138,9 @@ docker build -f services/marker-service/Dockerfile \
 ```bash
 SHA=$(git rev-parse --short HEAD)
 
-docker build -f services/nostr-proxy/Dockerfile \
-  -t ${IMAGE_PREFIX}/nostr-proxy:latest \
-  -t ${IMAGE_PREFIX}/nostr-proxy:sha-${SHA} \
+docker build -f services/retrieve-api/Dockerfile \
+  -t ${IMAGE_PREFIX}/retrieve-api:latest \
+  -t ${IMAGE_PREFIX}/retrieve-api:sha-${SHA} \
   .
 ```
 
@@ -166,7 +149,7 @@ docker build -f services/nostr-proxy/Dockerfile \
 修改 `libs/docblock-core` 後，需要重 build 以下服務：
 
 ```bash
-for SERVICE in retrieve-api admin-api ingest-worker webhook-service; do
+for SERVICE in retrieve-api document-api ingest-worker webhook-service; do
   docker build -f services/${SERVICE}/Dockerfile \
     -t ${IMAGE_PREFIX}/${SERVICE}:latest \
     .
@@ -190,15 +173,15 @@ gh auth token | docker login ghcr.io -u <your-github-username> --password-stdin
 ### 2.2 Push 單一 service
 
 ```bash
-docker push ${IMAGE_PREFIX}/nostr-proxy:latest
-docker push ${IMAGE_PREFIX}/nostr-proxy:sha-${SHA}
+docker push ${IMAGE_PREFIX}/retrieve-api:latest
+docker push ${IMAGE_PREFIX}/retrieve-api:sha-${SHA}
 ```
 
 ### 2.3 Build 完立即 Push（推薦一次完成）
 
 ```bash
 SHA=$(git rev-parse --short HEAD)
-SERVICE=nostr-consumer   # 改成目標 service
+SERVICE=retrieve-api   # 改成目標 service
 
 docker build -f services/${SERVICE}/Dockerfile \
   -t ${IMAGE_PREFIX}/${SERVICE}:latest \
@@ -213,7 +196,7 @@ docker push ${IMAGE_PREFIX}/${SERVICE}:sha-${SHA}
 ```bash
 SHA=$(git rev-parse --short HEAD)
 
-for SERVICE in nostr-proxy nostr-consumer retrieve-api admin-api ingest-worker webhook-service marker-service; do
+for SERVICE in retrieve-api document-api ingest-worker webhook-service; do
   echo "=== Pushing ${SERVICE} ==="
   docker push ${IMAGE_PREFIX}/${SERVICE}:latest
   docker push ${IMAGE_PREFIX}/${SERVICE}:sha-${SHA}
@@ -277,133 +260,18 @@ source ~/.secrets
 | 服務 | URL |
 |------|-----|
 | retrieve-api | `http://10.90.20.55:31761` |
-| admin-api | `http://10.90.20.55:31765` |
+| document-api | `http://10.90.20.55:31765` |
 | webhook-service | `http://10.90.20.55:31763` |
-| nostr-proxy | `http://10.90.20.55:31800` |
-
-### 3.4 Deployment 範例（參考）
-
-```yaml
-# k8s/nostr-proxy.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: nostr-proxy
-  namespace: docblock
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: nostr-proxy
-  template:
-    metadata:
-      labels:
-        app: nostr-proxy
-    spec:
-      imagePullSecrets:
-        - name: ghcr-secret          # ← 上面建立的 secret
-      containers:
-        - name: nostr-proxy
-          image: ghcr.io/<owner>/docblock-rag-platform/nostr-proxy:latest
-          ports:
-            - containerPort: 8800
-          env:
-            - name: RELAY_URL
-              value: "wss://your-relay-host:9443/"
-            - name: NOSTR_PRIV_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: nostr-keys
-                  key: NOSTR_PRIV_KEY
-            - name: NOSTR_PUB_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: nostr-keys
-                  key: NOSTR_PUB_KEY
-            - name: PYTHONUNBUFFERED
-              value: "1"
-```
-
-```yaml
-# k8s/nostr-consumer.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: nostr-consumer
-  namespace: docblock
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: nostr-consumer
-  template:
-    metadata:
-      labels:
-        app: nostr-consumer
-    spec:
-      imagePullSecrets:
-        - name: ghcr-secret
-      terminationGracePeriodSeconds: 15    # 等待 SIGTERM handler 完成
-      containers:
-        - name: nostr-consumer
-          image: ghcr.io/<owner>/docblock-rag-platform/nostr-consumer:latest
-          env:
-            - name: RELAY_URL
-              value: "wss://your-relay-host:9443/"
-            - name: LITELLM_BASE_URL
-              value: "http://your-litellm-host:4000"
-            - name: LITELLM_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: litellm-secret
-                  key: LITELLM_API_KEY
-            - name: BOT_PRIVATE_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: nostr-keys
-                  key: BOT_PRIVATE_KEY
-            - name: BOT_PUBKEY
-              valueFrom:
-                secretKeyRef:
-                  name: nostr-keys
-                  key: BOT_PUBKEY
-            - name: PYTHONUNBUFFERED
-              value: "1"
-          livenessProbe:
-            exec:
-              command:
-                - python3
-                - -c
-                - |
-                  import sqlite3, os, sys
-                  c = sqlite3.connect(os.getenv('DATABASE_URL', './data/audit.db'))
-                  c.execute('SELECT 1')
-                  sys.exit(0)
-            initialDelaySeconds: 15
-            periodSeconds: 30
-            failureThreshold: 3
-```
-
-### 3.3 建立 Nostr 金鑰的 K8s Secret
-
-```bash
-kubectl create secret generic nostr-keys \
-  --from-literal=NOSTR_PRIV_KEY=<proxy-private-key> \
-  --from-literal=NOSTR_PUB_KEY=<proxy-public-key> \
-  --from-literal=BOT_PRIVATE_KEY=<consumer-private-key> \
-  --from-literal=BOT_PUBKEY=<consumer-public-key> \
-  --namespace=docblock
-```
 
 ### 3.4 部署
 
 ```bash
-kubectl apply -f k8s/nostr-proxy.yaml
-kubectl apply -f k8s/nostr-consumer.yaml
+# 01-secrets.yaml（機密，不進 git）與 02-configmap.yaml（進 git）需先手動維護好
+kubectl apply -f deployments/k8s/
 
 # 確認狀態
 kubectl get pods -n docblock
-kubectl logs -f deployment/nostr-consumer -n docblock
+kubectl logs -f deployment/retrieve-api -n docblock
 ```
 
 ### 3.5 更新 image（程式碼有變動後）
@@ -411,26 +279,26 @@ kubectl logs -f deployment/nostr-consumer -n docblock
 ```bash
 # 方法一：指定新的 SHA tag（推薦，可回滾）
 SHA=$(git rev-parse --short HEAD)
-kubectl set image deployment/nostr-consumer \
-  nostr-consumer=ghcr.io/<owner>/docblock-rag-platform/nostr-consumer:sha-${SHA} \
+kubectl set image deployment/retrieve-api \
+  retrieve-api=ghcr.io/<owner>/docblock-rag-platform/retrieve-api:sha-${SHA} \
   -n docblock
 
 # 方法二：強制重新拉取 latest
-kubectl rollout restart deployment/nostr-consumer -n docblock
+kubectl rollout restart deployment/retrieve-api -n docblock
 
 # 查看更新進度
-kubectl rollout status deployment/nostr-consumer -n docblock
+kubectl rollout status deployment/retrieve-api -n docblock
 ```
 
 ### 3.6 回滾
 
 ```bash
 # 回到上一個版本
-kubectl rollout undo deployment/nostr-consumer -n docblock
+kubectl rollout undo deployment/retrieve-api -n docblock
 
 # 回到指定 SHA tag
-kubectl set image deployment/nostr-consumer \
-  nostr-consumer=ghcr.io/<owner>/docblock-rag-platform/nostr-consumer:sha-<old-sha> \
+kubectl set image deployment/retrieve-api \
+  retrieve-api=ghcr.io/<owner>/docblock-rag-platform/retrieve-api:sha-<old-sha> \
   -n docblock
 ```
 
@@ -440,7 +308,7 @@ kubectl set image deployment/nostr-consumer \
 
 ```bash
 # 查看 GHCR 上的 image tags
-gh api /user/packages/container/docblock-rag-platform%2Fnostr-consumer/versions \
+gh api /user/packages/container/docblock-rag-platform%2Fretrieve-api/versions \
   --jq '.[].metadata.container.tags'
 
 # 查看本機所有 docblock image

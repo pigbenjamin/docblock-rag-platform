@@ -2,7 +2,7 @@ import httpx
 
 
 class KeycloakClient:
-    def __init__(self, keycloak_url, realm, client_id, client_secret, verify=False):
+    def __init__(self, keycloak_url, realm, client_id, client_secret, verify=True):
         self.keycloak_url = keycloak_url.rstrip("/")
         self.realm = realm
         self.client_id = client_id

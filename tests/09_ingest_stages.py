@@ -7,7 +7,7 @@
   POST /jobs/ingest       — chunk_block.json → PostgreSQL
 
 使用 container 內現有的 PDF（CONTAINER_PDF），
-以新的 doc_id 避免覆蓋現有資料。
+以新的 document_id（UUID）避免覆蓋現有資料。
 """
 import sys, os, time, uuid
 sys.path.insert(0, os.path.dirname(__file__))
@@ -16,8 +16,8 @@ from config import *
 
 header("09  Ingest Worker 分階段執行")
 
-STAGE_DOC_ID = f"stage-test-{uuid.uuid4().hex[:6]}"
-info(f"使用 doc_id={STAGE_DOC_ID!r}")
+STAGE_DOCUMENT_ID = str(uuid.uuid4())
+info(f"使用 document_id={STAGE_DOCUMENT_ID!r}")
 info(f"PDF 路徑（container 內）：{CONTAINER_PDF}")
 
 def wait_job(job_id, label, timeout=300):
@@ -60,11 +60,11 @@ else:
     else:
         fail(f"Stage 1 marker {status}：{detail[:200]}")
 
-# marker 輸出的 Markdown 路徑（marker 依 pdf stem 命名目錄）
+# marker 輸出的 Markdown 路徑（marker 依 pdf stem 命名目錄，因未指定 document_id）
 import os.path as osp
 pdf_stem = osp.splitext(osp.basename(CONTAINER_PDF))[0]
 MD_PATH = f"{CONTAINER_WORK_DIR}/{pdf_stem}/raw.md"
-OUT_JSON = f"{CONTAINER_WORK_DIR}/{STAGE_DOC_ID}.chunk_block.json"
+OUT_JSON = f"{CONTAINER_WORK_DIR}/{STAGE_DOCUMENT_ID}.chunk_block.json"
 info(f"預期 md_path={MD_PATH}")
 info(f"out_json={OUT_JSON}")
 
@@ -79,7 +79,7 @@ r = requests.post(
         "job_id":      job_id_2,
         "fixed_md":    MD_PATH,
         "out_json":    OUT_JSON,
-        "doc_id":      STAGE_DOC_ID,
+        "document_id": STAGE_DOCUMENT_ID,
         "source_path": "stage-test/deptA_IT-OT_Network_Policy.pdf",
     },
     timeout=15,
@@ -120,8 +120,8 @@ else:
 # ─────────────────────────────────────────────────────────────
 # 驗證：文件已進入 DB
 # ─────────────────────────────────────────────────────────────
-info(f"驗證文件 {STAGE_DOC_ID!r} 出現於 GET /v1/documents/")
-r = requests.get(f"{ADMIN_API}/v1/documents/{STAGE_DOC_ID}", timeout=10)
+info(f"驗證文件 {STAGE_DOCUMENT_ID!r} 出現於 GET /v1/documents/")
+r = requests.get(f"{DOCUMENT_API}/v1/documents/{STAGE_DOCUMENT_ID}", timeout=10)
 if r.status_code == 200:
     d = r.json()
     ok(f"文件已建立  document_id={d['document_id']}  version={d['active_version']}")

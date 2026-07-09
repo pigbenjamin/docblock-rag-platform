@@ -2,23 +2,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: admin-api
+  name: document-api
   namespace: docblock
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: admin-api
+      app: document-api
   template:
     metadata:
       labels:
-        app: admin-api
+        app: document-api
     spec:
       imagePullSecrets:
         - name: pigbenjamin-ghcr-secret
       containers:
-        - name: admin-api
-          image: ghcr.io/pigbenjamin/docblock-rag-platform/admin-api:latest
+        - name: document-api
+          image: ghcr.io/pigbenjamin/docblock-rag-platform/document-api:latest
           ports:
             - containerPort: 8765
           envFrom:
@@ -40,12 +40,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: admin-api
+  name: document-api
   namespace: docblock
 spec:
   type: NodePort
   selector:
-    app: admin-api
+    app: document-api
   ports:
     - port: 8765
       targetPort: 8765
