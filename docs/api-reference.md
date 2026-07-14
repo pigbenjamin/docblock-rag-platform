@@ -324,7 +324,7 @@ PDF ingest pipeline，各端點背景執行並立即回傳 job_id。
 
 查詢 job 狀態（`pending` | `running` | `done` | `failed`）。
 
-> **注意**：job 狀態存於 in-memory dict，container 重啟後清空。
+> **注意**：`/jobs/pipeline` 的 job（job_id/document_id 皆為 UUID）持久化於 `ingest_jobs` 表，container 重啟後仍可查詢；只有 `/jobs/marker` 等分階段測試端點使用非 UUID job_id 時才落在 in-memory dict、重啟後清空。
 
 > PDF → Markdown（Marker）由**外部 LiteLLM** 的 `marker/pdf-to-md` 模型路由提供
 > （由 firdi-litellm 平台承載，非本平台部署的服務）。ingest-worker 透過

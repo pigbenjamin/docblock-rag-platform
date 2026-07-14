@@ -32,6 +32,9 @@ spec:
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
+            - name: postgres-init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "ai-x"]
@@ -47,6 +50,13 @@ spec:
         - name: postgres-data
           persistentVolumeClaim:
             claimName: docblock-postgres-pvc
+        - name: postgres-init
+          configMap:
+            # Generated from deployments/docker/postgres/init/01_schema.sql by
+            # k8s-setup.sh (kubectl create configmap --from-file), not hand-written -
+            # keep the SQL file as the single source of truth.
+            name: docblock-postgres-init
+            optional: true
 
 ---
 apiVersion: v1

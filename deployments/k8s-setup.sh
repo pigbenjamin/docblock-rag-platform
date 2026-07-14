@@ -43,7 +43,17 @@ kubectl create secret docker-registry pigbenjamin-ghcr-secret \
   --dry-run=client -o yaml | kubectl apply -f -
 echo "✅ imagePullSecret 完成"
 
-# ── 3. Apply manifests（照順序；01-secrets.yaml / 02-configmap.yaml
+# ── 3b. 建立 postgres init ConfigMap（內容來自 01_schema.sql，
+#        該檔案才是唯一真相來源，這裡只是每次 apply 時同步一份）────
+echo ""
+echo ">>> 建立 postgres init ConfigMap ..."
+kubectl create configmap docblock-postgres-init \
+  --from-file="${SCRIPT_DIR}/docker/postgres/init/01_schema.sql" \
+  --namespace="${NAMESPACE}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+echo "✅ postgres init ConfigMap 完成"
+
+# ── 4. Apply manifests（照順序；01-secrets.yaml / 02-configmap.yaml
 #       為唯一設定來源，手動維護，不進 git）───────────────────
 MANIFESTS=(
   01-secrets.yaml
