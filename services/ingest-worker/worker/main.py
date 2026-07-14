@@ -14,7 +14,6 @@ import uvicorn
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
-from docblock_core.acl import ACLService
 from docblock_core.config import settings
 from docblock_core.storage import LocalFileStorage
 from worker.tasks.build_chunks import run_build_chunks
@@ -80,7 +79,6 @@ class FullPipelineJobRequest(BaseModel):
     file_size: Optional[int] = None
     mime_type: Optional[str] = None
     created_by: Optional[str] = None
-    access_rules: Optional[Dict[str, str]] = None  # e.g. {"department:A": "detail", "user:<uuid>": "detail"}
 
 
 def _is_uuid(value: Optional[str]) -> bool:
@@ -184,7 +182,7 @@ async def _bg_ingest(job_id: str, chunk_block_json: str, tenant_id=None, documen
 async def _bg_full_pipeline(
     job_id: str, pdf_path: str, work_dir: str, document_id: str, source_path,
     title=None, original_filename=None, file_size=None, mime_type=None,
-    created_by=None, access_rules=None,
+    created_by=None,
 ):
     tenant_id = settings.db.tenant_id
 
@@ -203,13 +201,6 @@ async def _bg_full_pipeline(
 
         _set_status(job_id, JobStatus.running, "stage: ingest", stage="ingest", tenant_id=tenant_id, document_id=document_id, created_by=created_by)
         db_document_id, version = await _run_in_thread(run_ingest_chunks, out_json)
-
-        if access_rules:
-            _set_status(job_id, JobStatus.running, "stage: acl", stage="acl", tenant_id=tenant_id, document_id=document_id, created_by=created_by)
-            acl_service = ACLService(pg_dsn=settings.db.pg_dsn, tenant_id=tenant_id)
-            result = acl_service.write_access(document_id=db_document_id, access_map=access_rules)
-            if not result["success"]:
-                raise RuntimeError(f"ACL write failed: {result['errors']}")
 
         _set_status(job_id, JobStatus.running, "stage: finalize_storage", stage="finalize_storage", tenant_id=tenant_id, document_id=document_id, created_by=created_by)
         final_path = storage.finalize(tenant_id=tenant_id, document_id=db_document_id, version=version, temp_path=pdf_path)
@@ -267,7 +258,7 @@ def submit_full_pipeline(req: FullPipelineJobRequest, bg: BackgroundTasks):
     _set_status(req.job_id, JobStatus.pending, stage="pending", tenant_id=tenant_id, document_id=req.document_id, created_by=req.created_by)
     bg.add_task(
         _bg_full_pipeline, req.job_id, req.pdf_path, req.work_dir, req.document_id, req.source_path,
-        req.title, req.original_filename, req.file_size, req.mime_type, req.created_by, req.access_rules,
+        req.title, req.original_filename, req.file_size, req.mime_type, req.created_by,
     )
     return {"job_id": req.job_id, "status": JobStatus.pending}
 

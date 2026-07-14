@@ -38,17 +38,13 @@ SourceType = Literal[
     "table_dense",
     "table_lex",
     "image_text",
-    "summary",
-    "summary_lex",
 ]
-
-AccessLevel = Literal["detail", "summary", "deny"]
 
 @dataclass
 class SearchHit:
     source: SourceType
     document_id: str  # UUID string, the sole document identifier
-    chunk_index: int  # for summary hits, we use 0
+    chunk_index: int
     score: float  # higher is better
     content: str
     metadata: Dict[str, Any]
@@ -98,7 +94,7 @@ def _dedupe_by_key(hits: List[Tuple[SearchHit, float]]) -> List[Tuple[SearchHit,
     """
     best: Dict[Tuple[str, int, str], Tuple[SearchHit, float]] = {}
     for h, s in hits:
-        fam = "table" if h.source.startswith("table") else ("image" if h.source.startswith("image") else ("summary" if h.source.startswith("summary") else "text"))
+        fam = "table" if h.source.startswith("table") else ("image" if h.source.startswith("image") else "text")
         key = (h.document_id, h.chunk_index, fam)
         cur = best.get(key)
         if cur is None or s > cur[1]:
@@ -122,7 +118,6 @@ def _dedupe_by_content(hits: List[SearchHit]) -> List[SearchHit]:
         fam = (
             "table" if h.source.startswith("table")
             else "image" if h.source.startswith("image")
-            else "summary" if h.source.startswith("summary")
             else "text"
         )
 
@@ -141,14 +136,11 @@ def _dedupe_by_content(hits: List[SearchHit]) -> List[SearchHit]:
 # ---------------------------
 
 ROUTING_PROFILES: Dict[str, Dict[str, float]] = {
-    "balanced": {"text": 1.30, "table_dense": 1.00, "table_lex": 1.00, "image_text": 0.80, "summary": 1.00, "summary_lex": 1.10},
-    #"balanced": {"text": 1.00, "table_dense": 1.20, "table_lex": 1.30, "image_text": 0.80, "summary": 1.00, "summary_lex": 1.10},
-    "table_focus": {"text": 0.80, "table_dense": 1.50, "table_lex": 1.70, "image_text": 0.60, "summary": 0.90, "summary_lex": 1.00},
-    "image_focus": {"text": 0.80, "table_dense": 0.90, "table_lex": 0.90, "image_text": 1.80, "summary": 0.90, "summary_lex": 1.00},
-    "text_focus": {"text": 1.60, "table_dense": 0.90, "table_lex": 0.90, "image_text": 0.70, "summary": 1.10, "summary_lex": 1.10},
-    "lexical_focus": {"text": 0.70, "table_dense": 1.00, "table_lex": 2.20, "image_text": 0.60, "summary": 0.80, "summary_lex": 1.60},
-    # when user is in "summary" permission tier, this is the only profile that matters
-    "summary_only": {"summary": 1.00, "summary_lex": 1.20},
+    "balanced": {"text": 1.30, "table_dense": 1.00, "table_lex": 1.00, "image_text": 0.80},
+    "table_focus": {"text": 0.80, "table_dense": 1.50, "table_lex": 1.70, "image_text": 0.60},
+    "image_focus": {"text": 0.80, "table_dense": 0.90, "table_lex": 0.90, "image_text": 1.80},
+    "text_focus": {"text": 1.60, "table_dense": 0.90, "table_lex": 0.90, "image_text": 0.70},
+    "lexical_focus": {"text": 0.70, "table_dense": 1.00, "table_lex": 2.20, "image_text": 0.60},
 }
 
 ROUTER_SYSTEM = """\
@@ -183,12 +175,10 @@ def _parse_router_json(s: str) -> str:
 
 class DocblockSearchClient:
     """
-    Multi-tenant, ACL-aware search client (detail/summary/deny).
-
-    Key points:
-    - documents.document_id (UUID) is the sole identifier; documents.active_version tracks the current version
-    - For "detail" docs: searches text_chunks / table_chunks / image_chunks (version=active_version)
-    - For "summary" docs: searches summary_chunks only
+    Multi-tenant search client over text_chunks / table_chunks / image_chunks
+    (version=documents.active_version). Callers are responsible for
+    permission filtering (docblock_core.authz.NodeAuthz) before calling in -
+    this client has no ACL awareness of its own.
     """
 
     def __init__(
@@ -1112,89 +1102,6 @@ class DocblockSearchClient:
         return hits
 
     # ---------------------------
-    # Low-level searches (SUMMARY)
-    # ---------------------------
-    def search_summary_dense(self, *, tenant_id: str, document_id: str, qvec: List[float], k: int = 5) -> List[SearchHit]:
-        """
-        One summary row per doc. We still return a "hit" for fusion/formatting.
-        """
-        qv = _to_pg_vector_literal(qvec)
-        sql = """
-        SELECT
-          s.document_id::text AS document_id,
-          s.summary_text AS content,
-          s.metadata,
-          (1 - (s.embedding <=> %(qvec)s::vector)) AS score
-        FROM documents d
-        JOIN summary_chunks s
-          ON s.tenant_id = d.tenant_id
-         AND s.document_id = d.document_id
-        WHERE d.tenant_id = %(tenant_id)s
-          AND d.document_id = %(document_id)s::uuid
-          AND s.embedding IS NOT NULL
-        ORDER BY s.embedding <=> %(qvec)s::vector
-        LIMIT %(k)s
-        """
-        with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "document_id": document_id, "qvec": qv, "k": k})
-            rows = cur.fetchall()
-
-        hits: List[SearchHit] = []
-        for r in rows:
-            hits.append(
-                SearchHit(
-                    source="summary",
-                    document_id=r["document_id"],
-                    chunk_index=0,
-                    score=float(r["score"]) if r["score"] is not None else 0.0,
-                    content=r["content"] or "",
-                    metadata=_safe_json(r["metadata"]),
-                )
-            )
-        return hits
-
-    def search_summary_lexical(self, *, tenant_id: str, document_id: str, query: str, k: int = 5) -> List[SearchHit]:
-        """
-        Summary lexical via ts_rank on to_tsvector('simple', searchable_text).
-        """
-        sql = """
-        SELECT
-          s.document_id::text AS document_id,
-          s.summary_text AS content,
-          s.metadata,
-          ts_rank(to_tsvector('simple', s.searchable_text), plainto_tsquery('simple', %(q)s)) AS score
-        FROM documents d
-        JOIN summary_chunks s
-          ON s.tenant_id = d.tenant_id
-         AND s.document_id = d.document_id
-        WHERE d.tenant_id = %(tenant_id)s
-          AND d.document_id = %(document_id)s::uuid
-          AND plainto_tsquery('simple', %(q)s) @@ to_tsvector('simple', s.searchable_text)
-        ORDER BY score DESC
-        LIMIT %(k)s
-        """
-        with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, {"tenant_id": tenant_id, "document_id": document_id, "q": query, "k": k})
-            rows = cur.fetchall()
-
-        hits: List[SearchHit] = []
-        for r in rows:
-            s = float(r["score"]) if r["score"] is not None else 0.0
-            if s <= 0:
-                continue
-            hits.append(
-                SearchHit(
-                    source="summary_lex",
-                    document_id=r["document_id"],
-                    chunk_index=0,
-                    score=s,
-                    content=r["content"] or "",
-                    metadata=_safe_json(r["metadata"]),
-                )
-            )
-        return hits
-
-    # ---------------------------
     # Fusion
     # ---------------------------
     def fuse(
@@ -1204,8 +1111,6 @@ class DocblockSearchClient:
         table_dense_hits: List[SearchHit],
         table_lex_hits: List[SearchHit],
         image_hits: List[SearchHit],
-        summary_hits: List[SearchHit],
-        summary_lex_hits: List[SearchHit],
         weights: Optional[Dict[str, float]] = None,
         norm: str = "rrf",
     ) -> List[SearchHit]:
@@ -1214,8 +1119,6 @@ class DocblockSearchClient:
             "table_dense": 1.00,
             "table_lex": 1.00,
             "image_text": 0.80,
-            "summary": 1.00,
-            "summary_lex": 1.10,
         }
         if weights:
             w.update(weights)
@@ -1233,8 +1136,6 @@ class DocblockSearchClient:
         _ensure_raw(table_dense_hits, "table_dense")
         _ensure_raw(table_lex_hits, "table_lex")
         _ensure_raw(image_hits, "image_text")
-        _ensure_raw(summary_hits, "summary")
-        _ensure_raw(summary_lex_hits, "summary_lex")
 
         fused_pairs: List[Tuple[SearchHit, float, float, str]] = []
         # store: (hit, fused_score, weight_used, source_key)
@@ -1246,10 +1147,6 @@ class DocblockSearchClient:
             fused_pairs.append((h, w["table_lex"] * s, w["table_lex"], "table_lex"))
         for h, s in _rank_norm(image_hits, method=norm):
             fused_pairs.append((h, w["image_text"] * s, w["image_text"], "image_text"))
-        for h, s in _rank_norm(summary_hits, method=norm):
-            fused_pairs.append((h, w["summary"] * s, w["summary"], "summary"))
-        for h, s in _rank_norm(summary_lex_hits, method=norm):
-            fused_pairs.append((h, w["summary_lex"] * s, w["summary_lex"], "summary_lex"))
 
         # adapt your dedupe util: it expects List[Tuple[SearchHit, float]]
         # so we temporarily drop extra fields, then restore them
@@ -1296,7 +1193,6 @@ class DocblockSearchClient:
         *,
         document_id: str,
         query: str,
-        access: AccessLevel = "detail",
         tenant_id: Optional[str] = None,
         top_k: int = 20,
         top_k_per_doc: int = 20,
@@ -1306,17 +1202,18 @@ class DocblockSearchClient:
         weights: Optional[Dict[str, float]] = None,
     ) -> List[SearchHit]:
         """
-        Single-doc search respecting access level.
+        Single-doc search. Callers must check the document's `query`
+        permission (docblock_core.authz.NodeAuthz) before calling this -
+        access control lives entirely at the router layer, not here.
         """
         _t0 = time.perf_counter()
         t = tenant_id if tenant_id is not None else self.tenant_id
         if t is None:
             raise ValueError("tenant_id is required for search")
         logger.info(
-            "[search:start] tenant_id=%s document_id=%s access=%s top_k=%s top_k_per_doc=%s routing=%s enable_table_lex=%s query_len=%s",
+            "[search:start] tenant_id=%s document_id=%s top_k=%s top_k_per_doc=%s routing=%s enable_table_lex=%s query_len=%s",
             t,
             document_id,
-            access,
             top_k,
             top_k_per_doc,
             routing,
@@ -1327,51 +1224,6 @@ class DocblockSearchClient:
         try:
             qvec = self.embed_query(query)
 
-            if access == "deny":
-                logger.info(
-                    "[search:end] tenant_id=%s document_id=%s access=deny result_count=0 elapsed=%.2fs",
-                    t,
-                    document_id,
-                    time.perf_counter() - _t0,
-                )
-                return []
-
-            if access == "summary":
-                summary_hits = self.search_summary_dense(tenant_id=t, document_id=document_id, qvec=qvec, k=5)
-                summary_lex_hits: List[SearchHit] = []
-                try:
-                    summary_lex_hits = self.search_summary_lexical(tenant_id=t, document_id=document_id, query=query, k=5)
-                except Exception:
-                    summary_lex_hits = []
-
-                # routing profile for summary-only is optional; if enabled, use summary_only weights
-                routed_weights = weights
-                if routing and routed_weights is None:
-                    routed_weights = ROUTING_PROFILES["summary_only"]
-
-                fused = self.fuse(
-                    text_hits=[],
-                    table_dense_hits=[],
-                    table_lex_hits=[],
-                    image_hits=[],
-                    summary_hits=summary_hits,
-                    summary_lex_hits=summary_lex_hits,
-                    weights=routed_weights,
-                    norm="rrf",
-                )
-                out = fused[:top_k]
-                logger.info(
-                    "[search:summary] tenant_id=%s document_id=%s summary_dense=%s summary_lex=%s result_count=%s elapsed=%.2fs",
-                    t,
-                    document_id,
-                    len(summary_hits),
-                    len(summary_lex_hits),
-                    len(out),
-                    time.perf_counter() - _t0,
-                )
-                return out
-
-            # access == "detail"
             text_hits = self.search_text_dense(tenant_id=t, document_id=document_id, qvec=qvec, k=top_k_per_doc)
             table_dense_hits = self.search_table_dense(tenant_id=t, document_id=document_id, qvec=qvec, k=top_k_per_doc)
             image_hits = self.search_image_text_dense(tenant_id=t, document_id=document_id, qvec=qvec, k=max(5, top_k_per_doc // 3))
@@ -1397,8 +1249,6 @@ class DocblockSearchClient:
                 table_dense_hits=table_dense_hits,
                 table_lex_hits=table_lex_hits,
                 image_hits=image_hits,
-                summary_hits=[],
-                summary_lex_hits=[],
                 weights=routed_weights,
                 norm="rrf",
             )
@@ -1418,10 +1268,9 @@ class DocblockSearchClient:
             return out
         except Exception:
             logger.exception(
-                "[search:error] tenant_id=%s document_id=%s access=%s routing=%s",
+                "[search:error] tenant_id=%s document_id=%s routing=%s",
                 t,
                 document_id,
-                access,
                 routing,
             )
             raise
@@ -1431,7 +1280,6 @@ class DocblockSearchClient:
         *,
         document_ids: List[str],
         query: str,
-        access_map: Optional[Dict[str, AccessLevel]] = None,
         top_k_per_doc: int = 20,
         top_k: int = 20,
         routing: bool = True,
@@ -1443,10 +1291,9 @@ class DocblockSearchClient:
         rerank_model: str = settings.models.rerank_model,
     ) -> Dict[str, Any]:
         """
-        Cross-doc retrieval, ACL-aware via access_map.
-
-        - access_map[document_id] decides whether this doc is searched in detail or summary tier.
-        - deny docs are ignored.
+        Cross-doc retrieval. `document_ids` must already be permission-filtered
+        by the caller (docblock_core.authz.NodeAuthz.filter_allowed with
+        action='query') - this method does no access control of its own.
         """
         _t0 = time.perf_counter()
         logger.info(
@@ -1466,15 +1313,11 @@ class DocblockSearchClient:
         t = tenant_id if tenant_id is not None else self.tenant_id
         if t is None:
             raise ValueError("tenant_id is required for multi_search")
-        access_map = access_map or {d: "detail" for d in document_ids}
 
         # Deduplicate document_ids while keeping order
         used = list(dict.fromkeys([d for d in document_ids if d]))
-
-        # Filter out deny early
-        used = [d for d in used if access_map.get(d, "deny") != "deny"]
         logger.info(
-            "[multi_search:acl] tenant_id=%s input_document_ids=%s usable_document_ids=%s",
+            "[multi_search:docs] tenant_id=%s input_document_ids=%s usable_document_ids=%s",
             t,
             len(document_ids),
             len(used),
@@ -1490,12 +1333,12 @@ class DocblockSearchClient:
                 "document_ids_input": document_ids,
                 "document_ids_used": [],
                 "hits": [],
-                "note": "No document_ids left after ACL filtering (deny).",
+                "note": "document_ids is empty after deduplication.",
             }
 
         qvec = self.embed_query(query)
 
-        # Route once (shared across docs) — but only meaningful for detail docs.
+        # Route once (shared across docs)
         profile = "balanced"
         routed_weights = weights
         if routing and routed_weights is None:
@@ -1516,127 +1359,96 @@ class DocblockSearchClient:
 
         all_hits: List[SearchHit] = []
 
-        # --- summary tier: per-doc summary_chunks search ---
-        summary_ids = [d for d in used if access_map.get(d, "deny") == "summary"]
-        for did in summary_ids:
-            s_dense = self.search_summary_dense(tenant_id=t, document_id=did, qvec=qvec, k=5)
-            s_lex: List[SearchHit] = []
-            try:
-                s_lex = self.search_summary_lexical(tenant_id=t, document_id=did, query=query, k=5)
-            except Exception:
-                s_lex = []
+        # Stage1 routing (text_lex FTS) -> Stage2 dense multi-doc
+        # Stage 1: routing (pick candidate docs)
+        # 你可以先用一個保守值：TopN=100；資料大了再調小
+        routed_ids = self.route_docs_text_lexical(
+            tenant_id=t,
+            document_ids=used,
+            query=query,
+            n=min(100, len(used)),
+        )
 
-            fused = self.fuse(
-                text_hits=[],
-                table_dense_hits=[],
-                table_lex_hits=[],
-                image_hits=[],
-                summary_hits=s_dense,
-                summary_lex_hits=s_lex,
-                weights=ROUTING_PROFILES["summary_only"],
-                norm="rrf",
-            )
-            all_hits.extend(fused[: max(3, top_k_per_doc // 4)])
-        if summary_ids:
-            logger.info(
-                "[multi_search:summary] tenant_id=%s summary_ids=%s hits=%s",
-                t, len(summary_ids), len(all_hits),
-            )
+        # fallback：如果 FTS 命中太少，避免 routed_ids 變空
+        if not routed_ids:
+            routed_ids = used
+        logger.info(
+            "[multi_search:route] tenant_id=%s used=%s routed_ids=%s",
+            t,
+            len(used),
+            len(routed_ids),
+        )
 
-        # --- detail tier: Stage1 routing (text_lex FTS) -> Stage2 dense multi-doc ---
-        detail_ids = [d for d in used if access_map.get(d, "deny") == "detail"]
-        if detail_ids:
-            # Stage 1: routing (pick candidate docs)
-            # 你可以先用一個保守值：TopN=100；資料大了再調小
-            routed_detail_ids = self.route_docs_text_lexical(
+        # Stage 2: dense multi-doc (RAW scores)
+        # 建議多取一些候選，再由 fuse + top_k 截斷
+        k_text  = max(200, top_k * 20)
+        k_table = max(200, top_k * 20)
+        k_img   = max(200, top_k * 20)
+
+        text_hits = self.search_text_dense_multi(
+            tenant_id=t,
+            document_ids=routed_ids,
+            qvec=qvec,
+            k=k_text,
+        )
+
+        table_dense_hits = self.search_table_dense_multi(
+            tenant_id=t,
+            document_ids=routed_ids,
+            qvec=qvec,
+            k=k_table,
+        )
+
+        table_lex_hits: List[SearchHit] = []
+        if enable_table_lex:
+            table_lex_hits = self.search_table_lexical_multi(
                 tenant_id=t,
-                document_ids=detail_ids,
+                document_ids=routed_ids,
                 query=query,
-                n=min(100, len(detail_ids)),
-            )
-
-            # fallback：如果 FTS 命中太少，避免 routed_detail_ids 變空
-            if not routed_detail_ids:
-                routed_detail_ids = detail_ids
-            logger.info(
-                "[multi_search:detail] tenant_id=%s detail_ids=%s routed_detail_ids=%s",
-                t,
-                len(detail_ids),
-                len(routed_detail_ids),
-            )
-
-            # Stage 2: dense multi-doc (RAW scores)
-            # 建議多取一些候選，再由 fuse + top_k 截斷
-            k_text  = max(200, top_k * 20)
-            k_table = max(200, top_k * 20)
-            k_img   = max(200, top_k * 20)
-            
-            text_hits = self.search_text_dense_multi(
-                tenant_id=t,
-                document_ids=routed_detail_ids,
-                qvec=qvec,
-                k=k_text,
-            )
-
-            table_dense_hits = self.search_table_dense_multi(
-                tenant_id=t,
-                document_ids=routed_detail_ids,
-                qvec=qvec,
                 k=k_table,
             )
 
-            table_lex_hits: List[SearchHit] = []
-            if enable_table_lex:
-                table_lex_hits = self.search_table_lexical_multi(
-                    tenant_id=t,
-                    document_ids=routed_detail_ids,
-                    query=query,
-                    k=k_table,
-                )
+        image_hits = self.search_image_text_dense_multi(
+            tenant_id=t,
+            document_ids=routed_ids,
+            qvec=qvec,
+            k=k_img,
+        )
+        logger.info(
+            "[multi_search:hits] tenant_id=%s text=%s table_dense=%s table_lex=%s image=%s",
+            t,
+            len(text_hits),
+            len(table_dense_hits),
+            len(table_lex_hits),
+            len(image_hits),
+        )
 
-            image_hits = self.search_image_text_dense_multi(
-                tenant_id=t,
-                document_ids=routed_detail_ids,
-                qvec=qvec,
-                k=k_img,
-            )
-            logger.info(
-                "[multi_search:hits] tenant_id=%s text=%s table_dense=%s table_lex=%s image=%s",
-                t,
-                len(text_hits),
-                len(table_dense_hits),
-                len(table_lex_hits),
-                len(image_hits),
-            )
-            
-            # Mark RAW scores and sources before fusion
-            def _mark_raw(hits: list[SearchHit], source: str):
-                for h in hits:
-                    h.metadata.setdefault("raw_score", h.score)
-                    h.metadata.setdefault("raw_source", source)
-                    
-            _mark_raw(text_hits, "text_dense")
-            _mark_raw(table_dense_hits, "table_dense")
-            _mark_raw(table_lex_hits, "table_lex")
-            _mark_raw(image_hits, "image_text")
+        # Mark RAW scores and sources before fusion
+        def _mark_raw(hits: list[SearchHit], source: str):
+            for h in hits:
+                h.metadata.setdefault("raw_score", h.score)
+                h.metadata.setdefault("raw_source", source)
 
-            fused = self.fuse(
-                text_hits=text_hits,
-                table_dense_hits=table_dense_hits,
-                table_lex_hits=table_lex_hits,
-                image_hits=image_hits,
-                summary_hits=[],
-                summary_lex_hits=[],
-                weights=routed_weights,
-                norm="rrf",
-            )
-            all_hits.extend(fused[:top_k_per_doc])
-            logger.info(
-                "[multi_search:fused] tenant_id=%s fused_candidates=%s kept_per_doc=%s",
-                t,
-                len(fused),
-                min(len(fused), top_k_per_doc),
-            )
+        _mark_raw(text_hits, "text_dense")
+        _mark_raw(table_dense_hits, "table_dense")
+        _mark_raw(table_lex_hits, "table_lex")
+        _mark_raw(image_hits, "image_text")
+
+        fused = self.fuse(
+            text_hits=text_hits,
+            table_dense_hits=table_dense_hits,
+            table_lex_hits=table_lex_hits,
+            image_hits=image_hits,
+            weights=routed_weights,
+            norm="rrf",
+        )
+        all_hits.extend(fused[:top_k_per_doc])
+        logger.info(
+            "[multi_search:fused] tenant_id=%s fused_candidates=%s kept_per_doc=%s",
+            t,
+            len(fused),
+            min(len(fused), top_k_per_doc),
+        )
 
         all_hits.sort(key=lambda h: h.score, reverse=True)
         #print(all_hits[:top_k])  # debug
@@ -1673,7 +1485,6 @@ class DocblockSearchClient:
             },
             "hits": all_hits[:top_k],
             "rerank_hits": reranked[:top_k],
-            "access": {d: access_map.get(d, "deny") for d in used},
         }
         
     # ---------------------------

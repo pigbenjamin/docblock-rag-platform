@@ -37,9 +37,9 @@ for f in tests/0*.py; do echo "\n>>> $f"; python3 "$f"; done
 | `01_health_check.py` | 所有服務 `/healthz` + `/readyz` | < 5s |
 | `02_documents_list.py` | 列出文件、查單一文件、404 測試 | < 5s |
 | `03_upload_pipeline.py` | 上傳 PDF → 完整 pipeline → 驗證建立 | 1~5 分鐘 |
-| `04_acl_write_delete.py` | 設定/刪除 ACL、搜尋驗證 | < 30s |
-| `05_search_acl.py` | 多用戶存取層級驗證（detail/summary/deny） | < 30s |
-| `06_search_user_override.py` | user 規則覆蓋 dept 規則的優先順序驗證 | < 30s |
+| `04_acl_write_delete.py` | 設定/清空節點 ACL（`PUT /v1/nodes/{id}/acl`）、搜尋驗證 | < 30s |
+| `05_search_acl.py` | 多用戶 allow/deny 驗證（測試自建 ACL 狀態，不依賴預存 fixture） | < 30s |
+| `06_search_user_override.py` | user 規則覆蓋 department 規則的優先順序驗證 | < 30s |
 | `08_rag_answer.py` | RAG 問答生成 | 30~120s |
 | `09_ingest_stages.py` | ingest-worker 三個階段分別執行 | 1~5 分鐘 |
 | `10_document_delete.py` | 上傳 → 確認 → 刪除 → 驗證 404 | 1~5 分鐘 |

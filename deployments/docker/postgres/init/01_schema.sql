@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS documents (
   document_id    UUID NOT NULL,                  -- 唯一識別碼，上傳時由應用端生成（不在DB default）
 
   source_path    TEXT NOT NULL,
-  md_path        TEXT,
   title          TEXT,
   original_filename TEXT,                        -- 使用者上傳時的原始檔名
   file_size      BIGINT,                          -- bytes
@@ -243,184 +242,8 @@ ON user_principal (tenant_id, principal_type, principal_id);
 --  ON user_principal(tenant_id, principal_type, principal_id);
 
 -- =========================================================
--- 06_document_acl.sql  (tenant-aware + UUID FK)
--- =========================================================
-CREATE TABLE document_acl (
-    tenant_id TEXT NOT NULL,
-    document_id UUID NOT NULL,
-
-    principal_type TEXT NOT NULL
-        CHECK (principal_type IN ('user', 'department', 'role')),
-
-    principal_id TEXT NOT NULL,
-
-    effect TEXT NOT NULL
-        CHECK (effect IN ('detail', 'summary', 'deny')),
-
-    created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now(),
-
-    PRIMARY KEY (
-        tenant_id,
-        document_id,
-        principal_type,
-        principal_id
-    ),
-
-    FOREIGN KEY (tenant_id, document_id)
-    REFERENCES documents (tenant_id, document_id)
-    ON DELETE CASCADE
-);
-
-CREATE INDEX idx_document_acl_principal
-ON document_acl (
-    tenant_id,
-    principal_type,
-    principal_id
-);
-
-CREATE INDEX idx_document_acl_document
-ON document_acl (
-    tenant_id,
-    document_id
-);
-
---CREATE TABLE IF NOT EXISTS document_acl (
---  id             BIGSERIAL PRIMARY KEY,
---  tenant_id      TEXT NOT NULL,
---  document_id    UUID NOT NULL,
---
---  principal_type TEXT NOT NULL CHECK (principal_type IN ('department','role','user')),
---  principal_id   TEXT NOT NULL,
---
---  effect         TEXT NOT NULL CHECK (effect IN ('allow','deny')),
---  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
---
---  CONSTRAINT fk_document_acl_document
---    FOREIGN KEY (tenant_id, document_id)
---    REFERENCES documents(tenant_id, document_id)
---    ON DELETE CASCADE,
---
---  CONSTRAINT uq_document_acl
---    UNIQUE (tenant_id, document_id, principal_type, principal_id, effect)
---);
---
---CREATE INDEX IF NOT EXISTS idx_document_acl_lookup
---  ON document_acl(tenant_id, principal_type, principal_id, effect, document_id);
---
---CREATE INDEX IF NOT EXISTS idx_document_acl_doc
---  ON document_acl(tenant_id, document_id);
-
-
--- =========================================
--- 07_summary_chunks: one summary per document
--- =========================================
-
-CREATE TABLE IF NOT EXISTS summary_chunks (
-  tenant_id     text NOT NULL,
-  document_id   uuid NOT NULL,
-  version       INT  NOT NULL,  -- version of the summary
-
-  -- the actual summary content used for RAG (summary-level)
-  summary_text      text NOT NULL,
-
-  -- text used for lexical search (can be same as summary_text for now)
-  searchable_text   text NOT NULL,
-
-  -- optional metadata: model name, prompt version, language, generated_at, etc.
-  metadata      jsonb NOT NULL DEFAULT '{}'::jsonb,
-
-  -- for vector search
-  embedding     vector(768),
-
-  updated_at    timestamptz NOT NULL DEFAULT now(),
-
-  CONSTRAINT pk_summary_chunks PRIMARY KEY (tenant_id, document_id),
-
-  CONSTRAINT fk_summary_chunks_documents
-    FOREIGN KEY (tenant_id, document_id)
-    REFERENCES documents(tenant_id, document_id)
-    ON DELETE CASCADE
-);
-
--- Fast filtering by tenant/doc
-CREATE INDEX IF NOT EXISTS idx_summary_chunks_tenant
-  ON summary_chunks(tenant_id);
-
-CREATE INDEX IF NOT EXISTS idx_summary_chunks_tenant_doc
-  ON summary_chunks(tenant_id, document_id);
-
--- Optional: full-text search on summaries
-CREATE INDEX IF NOT EXISTS idx_summary_chunks_tsv
-  ON summary_chunks
-  USING GIN (to_tsvector('simple', searchable_text));
-
--- Optional: pgvector index if you later add embedding
-CREATE INDEX IF NOT EXISTS idx_summary_chunks_embedding_hnsw
-  ON summary_chunks USING hnsw (embedding vector_cosine_ops);
-
-
--- =========================================
--- 08_document_sum: one summary per document
--- =========================================
-
-  -- 需要 pgcrypto 與 pgvector（若你要用 UUID 產生與向量欄位）
--- CREATE EXTENSION IF NOT EXISTS pgcrypto;
--- CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE TABLE IF NOT EXISTS document_sum (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-  tenant_id   text NOT NULL,
-  document_id uuid NOT NULL,
-
-  -- 給人看的語義摘要（不含數據/細節）
-  semantic_summary   text NOT NULL,
-
-  -- 檢索用摘要：建議 JSONB（topics/intents/keywords/偏好chunk類型）
-  retrieval_summary  jsonb NOT NULL DEFAULT '{}'::jsonb,
-
-  -- 模型/提示詞版本/語言/生成時間/lint flags/內容hash等
-  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-
-  -- 向量
-  retrieval_embedding vector(768),
-  summary_embedding   vector(768),
-
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-
-  CONSTRAINT uq_document_sum UNIQUE (tenant_id, document_id),
-
-  CONSTRAINT fk_document_sum_documents
-    FOREIGN KEY (tenant_id, document_id)
-    REFERENCES documents(tenant_id, document_id)
-    ON DELETE CASCADE
-);
-
--- 常用查詢
-CREATE INDEX IF NOT EXISTS idx_document_sum_tenant
-  ON document_sum(tenant_id);
-
-CREATE INDEX IF NOT EXISTS idx_document_sum_tenant_doc
-  ON document_sum(tenant_id, document_id);
-
--- JSONB 過濾（例如 topics/keywords）
-CREATE INDEX IF NOT EXISTS idx_document_sum_retrieval_gin
-  ON document_sum USING GIN (retrieval_summary);
-
--- Optional: FTS（若你想做 lexical search，可把 retrieval_summary.keywords/topics 串成 text 存進 metadata 或另建欄位）
-CREATE INDEX IF NOT EXISTS idx_document_sum_tsv
-  ON document_sum USING GIN (to_tsvector('simple', coalesce(metadata->>'searchable_text','')));
-
--- Optional: 向量索引（若你之後真的會用 summary 向量召回）
-CREATE INDEX IF NOT EXISTS idx_document_sum_retrieval_emb_hnsw
-  ON document_sum USING hnsw (retrieval_embedding vector_cosine_ops);
-
-
--- =========================================
 -- 09_ingest_jobs: 持久化的上傳/ingest pipeline 任務狀態
--- =========================================
+-- =========================================================
 -- 取代 ingest-worker 原本的記憶體內 _jobs dict，重啟不遺失狀態。
 -- document_id 不設 FK：job 建立時（admin-api 產生 document_id 當下）
 -- documents row 通常還沒寫入，要等 ingest 階段才 INSERT。
@@ -449,3 +272,101 @@ CREATE INDEX IF NOT EXISTS idx_ingest_jobs_tenant_document
 
 CREATE INDEX IF NOT EXISTS idx_ingest_jobs_status
   ON ingest_jobs(tenant_id, status);
+
+-- =========================================================
+-- 10_nodes: 邏輯目錄樹（File Browser 整合 FB-1）
+-- =========================================================
+-- 前端目錄樹的權威來源：folder 與 document 都是一個 node。
+-- document 節點的 id 直接沿用 documents.document_id（同一個 UUID，
+-- 不另發 node_id），chunks/檢索/引用不需要多一層 join。
+-- documents -> nodes 的 FK 於 FB-5 cutover 時再補：過渡期舊上傳流程
+-- 尚未建 node，先加 FK 會擋掉現行寫入。
+CREATE TABLE IF NOT EXISTS nodes (
+  id                   UUID NOT NULL,
+  tenant_id            TEXT NOT NULL,
+  parent_id            UUID REFERENCES nodes(id) ON DELETE CASCADE,
+  node_type            TEXT NOT NULL CHECK (node_type IN ('folder', 'document')),
+  name                 TEXT NOT NULL,
+  owner_department_id  TEXT NOT NULL,                  -- 預設管理責任部門；該部門 KM 可管理此節點
+  inherit_acl          BOOLEAN NOT NULL DEFAULT true,  -- 本節點無可決定規則時是否繼續往 parent 找
+  permission_revision  BIGINT NOT NULL DEFAULT 1,      -- ACL/搬移變更版號（If-Match optimistic locking 用）
+  path_cache           TEXT,                           -- 顯示/除錯用快取；不是授權依據
+  created_by           UUID,
+  updated_by           UUID,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT pk_nodes PRIMARY KEY (id),
+  CONSTRAINT chk_nodes_document_has_parent
+    CHECK (node_type <> 'document' OR parent_id IS NOT NULL)
+);
+
+-- 同一資料夾下名稱唯一；root 層（parent NULL）另用 partial index
+CREATE UNIQUE INDEX IF NOT EXISTS uq_nodes_parent_name
+  ON nodes(tenant_id, parent_id, name) WHERE parent_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_nodes_root_name
+  ON nodes(tenant_id, name) WHERE parent_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_nodes_parent
+  ON nodes(tenant_id, parent_id);
+
+CREATE INDEX IF NOT EXISTS idx_nodes_owner_department
+  ON nodes(tenant_id, owner_department_id);
+
+-- =========================================================
+-- 11_acl_entries: 節點 ACL（action × allow/deny + 繼承）
+-- =========================================================
+-- 取代 document_acl 的 detail/summary/deny 三級制（document_acl 於
+-- FB-5 cutover 後移除）。subject_id 慣例：department -> Keycloak 群組名
+-- （如 'A'）；user -> Keycloak sub 的裸 UUID 字串。
+CREATE TABLE IF NOT EXISTS acl_entries (
+  tenant_id            TEXT NOT NULL,
+  node_id              UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  subject_type         TEXT NOT NULL CHECK (subject_type IN ('department', 'user', 'role')),
+  subject_id           TEXT NOT NULL,
+  action               TEXT NOT NULL CHECK (action IN
+                         ('browse', 'query', 'read', 'upload',
+                          'update', 'delete', 'move', 'manage_acl')),
+  effect               TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+  inherit_to_children  BOOLEAN NOT NULL DEFAULT true,
+  created_by           UUID,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT pk_acl_entries PRIMARY KEY (tenant_id, node_id, subject_type, subject_id, action)
+);
+
+CREATE INDEX IF NOT EXISTS idx_acl_entries_node
+  ON acl_entries(tenant_id, node_id);
+
+CREATE INDEX IF NOT EXISTS idx_acl_entries_subject
+  ON acl_entries(tenant_id, subject_type, subject_id);
+
+-- =========================================================
+-- 12_audit_logs: 稽核（v1 最小版：寫入型事件 + 下載）
+-- =========================================================
+-- event_type 慣例：document.upload / document.download / document.delete /
+-- node.create / node.rename / node.move / node.delete / acl.update
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id             BIGSERIAL PRIMARY KEY,
+  tenant_id      TEXT NOT NULL,
+  event_type     TEXT NOT NULL,
+  actor_id       UUID,                        -- NULL = 系統或 admin-secret bypass
+  resource_type  TEXT NOT NULL,               -- node | document | job
+  resource_id    TEXT NOT NULL,
+  before_data    JSONB,
+  after_data     JSONB,
+  result         TEXT NOT NULL DEFAULT 'ok'
+                   CHECK (result IN ('ok', 'denied', 'failed')),
+  reason         TEXT,
+  request_id     TEXT,
+  client_ip      INET,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_resource
+  ON audit_logs(tenant_id, resource_type, resource_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_actor
+  ON audit_logs(tenant_id, actor_id, created_at DESC);

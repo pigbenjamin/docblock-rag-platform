@@ -1,122 +1,88 @@
 """
-04 ACL Write & Delete
-POST /v1/acl/write-map  — 設定文件存取規則
-POST /v1/acl/delete-map — 刪除存取規則
-驗證：寫入後規則生效、刪除後規則消失（透過搜尋行為驗證）
+04 Node ACL Write & Delete
+PUT /v1/nodes/{document_id}/acl — 取代舊版 POST /v1/acl/write-map/delete-map。
+
+新模型是「整批取代節點自己的 entries」，不是逐條增刪；node 預設
+inherit_acl=true，沒有自己的 entries 時完全繼承 parent 資料夾的權限。
+所以「刪除規則」在新模型下 = 重新 PUT 一份不含該規則的 entries 清單
+（或整批清空，回到純繼承）。
+
+驗證：
+  1. 對文件寫入 2 條明確 deny（覆蓋掉從部門資料夾繼承來的 allow）
+  2. 搜尋確認：目標部門/使用者變成看不到，其他部門不受影響
+  3. 清空 entries（回到純繼承）
+  4. 搜尋確認：deny 消失，恢復可查詢
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 import requests
 from config import *
 
-header("04  ACL Write & Delete")
+header("04  Node ACL Write & Delete")
 
-ACL_HEADERS = {"X-Acl-Secret": ACL_ADMIN_SECRET, "Content-Type": "application/json"}
-DOC_ID  = "deptA_IT-OT_Network_Policy"
+DOC_ID   = "deptA_IT-OT_Network_Policy"
 DOC_UUID = EXISTING_DOCS[DOC_ID]
+OWNER_KM_USER = USERS["u001"]  # 假設是這份文件所在部門（A）的 KM
 
-# ── 1. 寫入 3 條 ACL 規則 ────────────────────────────────────
-info(f"POST /v1/acl/write-map  document_id={DOC_UUID}")
-rules = [
-    {"principal_type": "department", "principal_id": "dept-A", "effect": "detail"},
-    {"principal_type": "department", "principal_id": "dept-B", "effect": "summary"},
-    {"principal_type": "user",       "principal_id": USERS["u004"], "effect": "deny"},
+# ── 1. 寫入 2 條明確 deny（覆蓋資料夾繼承的 allow）──────────────
+info(f"PUT /v1/nodes/{DOC_UUID}/acl  document_id={DOC_UUID}")
+entries = [
+    {"subject_type": "department", "subject_id": DEPT_B, "actions": ["browse", "query", "read"], "effect": "deny"},
+    {"subject_type": "user", "subject_id": USERS["u004"], "actions": ["browse", "query", "read"], "effect": "deny"},
 ]
-r = requests.post(
-    f"{DOCUMENT_API}/v1/acl/write-map",
-    headers=ACL_HEADERS,
-    json={"document_id": DOC_UUID, "access_rules": rules},
-    timeout=ACL_TIMEOUT,
-)
+r = write_node_acl(DOC_UUID, OWNER_KM_USER, entries)
 if r.status_code != 200:
-    fail(f"write-map → HTTP {r.status_code}  body={r.text[:200]}")
+    fail(f"PUT acl → HTTP {r.status_code}  body={r.text[:300]}")
+    summary()
 else:
     body = r.json()
-    if body.get("ok") and body.get("count") == 3:
-        ok(f"write-map → ok=true  count={body['count']}")
-    else:
-        fail(f"write-map → 預期 count=3，got: {body}")
+    ok(f"PUT acl → permission_revision={body.get('permission_revision')}")
 
-# ── 2. 搜尋驗證：各用戶存取層級應符合規則 ───────────────────
-info("搜尋驗證 write-map 效果")
+# ── 2. 搜尋驗證：dept-B、u004 應變成看不到，u001（同部門）不受影響 ──
+info("搜尋驗證 deny 生效")
 
-cases = [
-    (USERS["u001"], "u001(dept-A)", "detail"),   # dept-A → detail
-    (USERS["u003"], "u003(dept-B)", "summary"),  # dept-B → summary
-    (USERS["u004"], "u004(deny)",   "deny"),      # user rule → deny
-]
 
-for user_id, label, expected_access in cases:
+def used_ids(user_id):
     r = requests.post(
         f"{RETRIEVE_API}/v1/search",
         json={"query": "IT OT 網路", "user_id": user_id, "document_ids": [DOC_UUID], "top_k": 5},
         timeout=ACL_TIMEOUT,
     )
     if r.status_code != 200:
-        fail(f"search({label}) → HTTP {r.status_code}")
-        continue
-    data   = r.json()
-    access = data.get("access", {}).get(DOC_UUID, "deny")  # 無 access 欄位 = 被拒
-    hits   = len(data.get("hits", []))
+        return None
+    return set(r.json().get("document_ids_used", []))
 
-    if access == expected_access:
-        ok(f"{label}  access={access}  hits={hits}")
-    else:
-        fail(f"{label}  預期 access={expected_access}，got={access}  principals={data.get('user',{}).get('principals','?')}")
 
-# ── 3. 刪除 ACL 規則 ─────────────────────────────────────────
-info(f"POST /v1/acl/delete-map  document_id={DOC_UUID}")
-principals_to_delete = [
-    "department:dept-B",
-    f"user:{USERS['u004']}",
+cases = [
+    (USERS["u001"], "u001(A部門, owner-KM)", True),
+    (USERS["u003"], "u003(B部門)", False),
+    (USERS["u004"], "u004(明確 deny)", False),
 ]
-r = requests.post(
-    f"{DOCUMENT_API}/v1/acl/delete-map",
-    headers=ACL_HEADERS,
-    json={"document_id": DOC_UUID, "principals": principals_to_delete},
-    timeout=ACL_TIMEOUT,
-)
-if r.status_code != 200:
-    fail(f"delete-map → HTTP {r.status_code}  body={r.text[:200]}")
-else:
-    body = r.json()
-    if body.get("ok") and body.get("count") == 2:
-        ok(f"delete-map → ok=true  count={body['count']}（刪除 dept-B 與 u004）")
+for user_id, label, expect_visible in cases:
+    used = used_ids(user_id)
+    if used is None:
+        fail(f"search({label}) 失敗")
+        continue
+    visible = DOC_UUID in used
+    if visible == expect_visible:
+        ok(f"{label}  可見={visible}（符合預期）")
     else:
-        fail(f"delete-map → 預期 count=2，got: {body}")
+        fail(f"{label}  可見={visible}，預期={expect_visible}")
 
-# ── 4. 驗證刪除後 dept-B 用戶變為 deny ───────────────────────
-info("搜尋驗證 delete-map 效果（dept-B 用戶應變 deny）")
-r = requests.post(
-    f"{RETRIEVE_API}/v1/search",
-    json={"query": "IT OT 網路", "user_id": USERS["u003"], "document_ids": [DOC_UUID], "top_k": 5},
-    timeout=ACL_TIMEOUT,
-)
+# ── 3. 清空 entries（回到純繼承）──────────────────────────────
+info(f"PUT /v1/nodes/{DOC_UUID}/acl（entries=[]，還原成純繼承部門資料夾權限）")
+r = write_node_acl(DOC_UUID, OWNER_KM_USER, [])
 if r.status_code == 200:
-    access = r.json().get("access", {}).get(DOC_UUID, "deny")
-    if access == "deny":
-        ok(f"刪除後 dept-B 用戶 access={access}（正確）")
-    else:
-        fail(f"刪除後 dept-B 用戶 access={access}（預期 deny）")
+    ok(f"還原成功 → permission_revision={r.json().get('permission_revision')}")
 else:
-    fail(f"驗證搜尋 → HTTP {r.status_code}")
+    fail(f"還原失敗 → HTTP {r.status_code}  body={r.text[:200]}")
 
-# ── 5. 還原：重設為 dept-A=detail 只保留一條 ─────────────────
-info("還原 ACL（只保留 dept-A=detail）")
-r = requests.post(
-    f"{DOCUMENT_API}/v1/acl/write-map",
-    headers=ACL_HEADERS,
-    json={
-        "document_id": DOC_UUID,
-        "access_rules": [
-            {"principal_type": "department", "principal_id": "dept-A", "effect": "detail"},
-        ],
-    },
-    timeout=ACL_TIMEOUT,
-)
-if r.status_code == 200 and r.json().get("ok"):
-    ok("ACL 已還原為 dept-A=detail")
+# ── 4. 驗證還原後 dept-B 使用者恢復可見 ─────────────────────────
+info("搜尋驗證還原效果（B 部門使用者應恢復可見）")
+used = used_ids(USERS["u003"])
+if used is not None and DOC_UUID in used:
+    ok(f"還原後 u003 可見（繼承恢復生效）")
 else:
-    fail(f"還原失敗 → {r.text[:100]}")
+    fail(f"還原後 u003 仍不可見（預期繼承恢復）：document_ids_used={used}")
 
 summary()

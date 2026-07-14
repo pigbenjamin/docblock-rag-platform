@@ -7,13 +7,14 @@ from fastmcp import FastMCP
 
 from docblock_core.rag import RagClient
 from docblock_core.search import DocblockSearchClient, SearchHit
-from docblock_core.acl import fetch_doc_access_for_user
+from docblock_core.authz import NodeAuthz, list_document_ids
 from docblock_core.config import settings
 
 mcp = FastMCP("docblock-rag")
 
 _rag: Optional[RagClient] = None
 _search_client: Optional[DocblockSearchClient] = None
+_node_authz = NodeAuthz(pg_dsn=settings.db.pg_dsn, tenant_id=settings.db.tenant_id)
 
 
 def _get_rag() -> RagClient:
@@ -64,96 +65,27 @@ def _ollama_chat(messages: List[Dict[str, str]], *, model: str, timeout: int = 1
 # ---------------------------
 @mcp.tool(
     name="rag_answer",
-    description="Answer a question using document-specific RAG with citations (ACL enforced: detail/summary/deny).",
+    description="Answer a question using document-specific RAG with citations (ACL enforced: query permission).",
 )
 def rag_answer(
     document_id: str,
     question: str,
     user_id: str,
-    document_ids: Optional[List[str]] = None,  # optional candidate scope
     top_k: int = 10,
     routing: bool = True,
 ) -> Dict[str, Any]:
-    """
-    - If user has DETAIL for doc: use full RagClient (text/table/image).
-    - If user has SUMMARY for doc: use only summary_chunks as context.
-    - If DENY: return ACL_DENY.
-    """
-    tenant_id = settings.db.tenant_id
-
-    access_map, principals = fetch_doc_access_for_user(
-        pg_dsn=settings.db.pg_dsn,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        candidate_document_ids=document_ids,
-        limit=5000,
-    )
-
-    access = access_map.get(document_id, "deny")
-    if access == "deny":
+    allowed = _node_authz.evaluate_one(user_id=user_id, action="query", node_id=document_id)
+    if not allowed:
         return {
             "answer": "",
             "citations": [],
             "model": getattr(settings.models, "chat_model", None),
-            "error": "ACL_DENY",
+            "error": "ACL_NOT_FOUND" if allowed is None else "ACL_DENY",
             "message": f"user '{user_id}' is not allowed to access document_id='{document_id}'",
-            "user": {"user_id": user_id, "principals": principals},
+            "user_id": user_id,
             "document_id_requested": document_id,
-            "document_id_access": access,
         }
 
-    if access == "summary":
-        # summary-only retrieval
-        hits = _get_search_client().search(
-            document_id=document_id,
-            query=question,
-            access="summary",
-            tenant_id=tenant_id,
-            top_k=max(3, min(top_k, 8)),
-            routing=False,  # summary only
-        )
-        context = _get_search_client().format_context(hits, max_chars_per_hit=2200)
-
-        # Chat model name: prefer settings.models.chat_model, else fall back to embed_model (not ideal but works)
-        chat_model = getattr(settings.models, "chat_model", None) or getattr(settings.models, "gen_model", None) or settings.models.embed_model
-
-        system = (
-            "You are a helpful assistant.\n"
-            "Answer the question using ONLY the provided context.\n"
-            "If the context is insufficient, say you don't know based on the provided context."
-        )
-        user = f"Question:\n{question}\n\nContext:\n{context}\n"
-
-        answer = _ollama_chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            model=str(chat_model),
-            timeout=getattr(settings.models, "chat_timeout", 180),
-        )
-
-        citations: List[Dict[str, Any]] = []
-        for i, h in enumerate(hits, start=1):
-            citations.append(
-                {
-                    "index": i,
-                    "document_id": h.document_id,
-                    "source": h.source,
-                    "chunk_index": h.chunk_index,
-                    "page_start": (h.metadata or {}).get("page_start"),
-                    "page_end": (h.metadata or {}).get("page_end"),
-                }
-            )
-
-        return {
-            "answer": answer,
-            "citations": citations,
-            "model": str(chat_model),
-            "user": {"user_id": user_id, "principals": principals},
-            "document_id_requested": document_id,
-            "document_id_access": access,
-            "routing": {"enabled": False, "note": "summary-only"},
-        }
-
-    # access == detail
     result = _get_rag().generate(
         document_id=document_id,
         question=question,
@@ -180,9 +112,8 @@ def rag_answer(
         "answer": result.answer,
         "citations": citations,
         "model": result.model,
-        "user": {"user_id": user_id, "principals": principals},
+        "user_id": user_id,
         "document_id_requested": document_id,
-        "document_id_access": access,
         "routing": {"enabled": routing},
     }
 
@@ -192,7 +123,7 @@ def rag_answer(
 # ---------------------------
 @mcp.tool(
     name="rag_search",
-    description="Cross-doc retrieval for RAG. Applies ACL automatically (detail/summary/deny).",
+    description="Cross-doc retrieval for RAG. Applies ACL automatically (query permission, allow/deny).",
 )
 def rag_search(
     query: str,
@@ -208,20 +139,17 @@ def rag_search(
 ) -> Dict[str, Any]:
     tenant_id = settings.db.tenant_id
 
-    access_map, principals = fetch_doc_access_for_user(
+    candidates = list_document_ids(
         pg_dsn=settings.db.pg_dsn,
         tenant_id=tenant_id,
-        user_id=user_id,
         candidate_document_ids=document_ids,
         limit=max_docs,
     )
-
-    # Keep only detail/summary
-    allowed = [d for d, a in access_map.items() if a in ("detail", "summary")]
+    allowed = _node_authz.filter_allowed(user_id=user_id, action="query", node_ids=candidates)
     if not allowed:
         return {
             "query": query,
-            "user": {"user_id": user_id, "principals": principals},
+            "user_id": user_id,
             "document_ids_input": document_ids or [],
             "document_ids_used": [],
             "hits": [],
@@ -230,7 +158,6 @@ def rag_search(
 
     res = _get_search_client().multi_search(
         document_ids=allowed,
-        access_map=access_map,
         query=query,
         top_k=top_k,
         top_k_per_doc=top_k_per_doc,
@@ -245,10 +172,9 @@ def rag_search(
 
     return {
         "query": query,
-        "user": {"user_id": user_id, "principals": principals},
+        "user_id": user_id,
         "document_ids_input": document_ids or [],
         "document_ids_used": res.get("document_ids_used", allowed),
-        "access": res.get("access", {}),
         "routing": res.get("routing", {"enabled": routing, "router_model": router_model}),
         "hits": hits_out,
     }

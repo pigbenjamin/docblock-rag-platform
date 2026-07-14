@@ -37,17 +37,15 @@ class ModelSettings:
     # segmentation / structure extraction
     seg_model: str = os.getenv("SEG_MODEL", "gemma-4-26B-A4B-it")
     litellm_base_url: str = os.getenv("LITELLM_BASE_URL", "http://localhost:4000")
-    # deprecated aliases: legacy code reads ollama_base_url / ollama_gen_url;
-    # both now route to the same OpenAI-compatible LiteLLM endpoint
+    # deprecated alias: legacy code reads ollama_base_url; routes to the same
+    # OpenAI-compatible LiteLLM endpoint
     ollama_base_url: str = os.getenv("LITELLM_BASE_URL", "http://localhost:4000")
-    ollama_gen_url: str = os.getenv("LITELLM_BASE_URL", "http://localhost:4000")
     embed_model: str = os.getenv("EMBED_MODEL", "embeddinggemma-300m")
     # EmbeddingGemma task prompts（模型卡要求；若 serving 端已自動加前綴，設成空字串 "" 停用）
     embed_query_prefix: str = os.getenv("EMBED_QUERY_PREFIX", "task: search result | query: ")
     embed_doc_prefix: str = os.getenv("EMBED_DOC_PREFIX", "title: none | text: ")
-    summary_model: str = os.getenv("SUMMARY_MODEL", "gemma-4-26B-A4B-it")
     chat_model: str = os.getenv("CHAT_MODEL", "gemma-4-26B-A4B-it")
-    
+
     # vision
     vision_device: str = os.getenv("VISION_DEVICE", "cuda")
     clip_model: str = os.getenv("CLIP_MODEL", "openai/clip-vit-large-patch14")
@@ -55,8 +53,7 @@ class ModelSettings:
 
     # timeout
     embed_timeout: int = int(os.getenv("EMBED_TIMEOUT", "120"))
-    summary_timeout: int = int(os.getenv("SUMMARY_TIMEOUT", "180"))
-    
+
     # reranker
     # rerank 服務已於 2026-07 自外部 LiteLLM 移除；留空時 rerank 呼叫失敗會 fallback 原始排序
     rerank_model: str = os.getenv("RERANK_MODEL", "")

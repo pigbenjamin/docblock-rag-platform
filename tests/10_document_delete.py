@@ -13,11 +13,17 @@ from config import *
 
 header("10  Document Delete")
 
-ACL_HEADERS = {"X-Acl-Secret": ACL_ADMIN_SECRET, "Content-Type": "application/json"}
+UPLOADER_USER_ID = USERS["u001"]
 
 # ── 1. 上傳一份新文件作為刪除目標 ────────────────────────────
 if not os.path.exists(TEST_PDF):
     fail(f"測試 PDF 不存在：{TEST_PDF}")
+    summary()
+
+info(f"找出 u001 所屬部門（{DEPT_A}）的根資料夾 node_id")
+parent_folder_id = find_root_folder_id(UPLOADER_USER_ID, DEPT_A)
+if not parent_folder_id:
+    fail(f"找不到部門 '{DEPT_A}' 的根資料夾")
     summary()
 
 info("建立待刪文件（不指定 document_id，由伺服器生成）")
@@ -26,7 +32,8 @@ with open(TEST_PDF, "rb") as f:
     r = requests.post(
         f"{DOCUMENT_API}/v1/documents/upload",
         files={"file": ("test.pdf", f, "application/pdf")},
-        data={"title": "Document for Delete Test"},
+        data={"title": "Document for Delete Test", "parent_folder_id": parent_folder_id},
+        headers={"X-User-Id": UPLOADER_USER_ID},
         timeout=30,
     )
 if r.status_code != 200:
@@ -44,7 +51,11 @@ MAX_WAIT = 300
 elapsed  = 0
 done = False
 while elapsed < MAX_WAIT:
-    rj = requests.get(f"{DOCUMENT_API}/v1/documents/job/{job_id}", timeout=10)
+    rj = requests.get(
+        f"{DOCUMENT_API}/v1/documents/job/{job_id}",
+        headers={"X-User-Id": UPLOADER_USER_ID},
+        timeout=10,
+    )
     status = rj.json().get("status")
     if status == "done":
         done = True
@@ -62,27 +73,21 @@ if not done:
 ok(f"Pipeline 完成（耗時 ~{elapsed}s）")
 
 # ── 3. 確認文件存在 ─────────────────────────────────────────
-r = requests.get(f"{DOCUMENT_API}/v1/documents/{document_id}", timeout=10)
+r = requests.get(
+    f"{DOCUMENT_API}/v1/documents/{document_id}",
+    headers={"X-User-Id": UPLOADER_USER_ID},
+    timeout=10,
+)
 if r.status_code != 200:
     fail(f"取得文件 metadata → HTTP {r.status_code}")
     summary()
 ok(f"文件確認存在  document_id={document_id}")
 
-# ── 4. 設定 ACL 並搜尋確認有 hits ────────────────────────────
-info("設定 ACL → u001 detail")
-requests.post(
-    f"{DOCUMENT_API}/v1/acl/write-map",
-    headers=ACL_HEADERS,
-    json={
-        "document_id": document_id,
-        "access_rules": [{"principal_type": "user", "principal_id": USERS["u001"], "effect": "detail"}],
-    },
-    timeout=10,
-)
-
+# ── 4. 搜尋確認有 hits（新文件預設 inherit_acl=true，已透過
+#      parent_folder_id 繼承部門資料夾的 query 權限，不需要額外設 ACL）──
 r = requests.post(
     f"{RETRIEVE_API}/v1/search",
-    json={"query": "policy", "user_id": USERS["u001"], "document_ids": [document_id], "top_k": 3},
+    json={"query": "policy", "user_id": UPLOADER_USER_ID, "document_ids": [document_id], "top_k": 3},
     timeout=SEARCH_TIMEOUT,
 )
 if r.status_code == 200:
@@ -93,7 +98,11 @@ else:
 
 # ── 5. 刪除文件 ───────────────────────────────────────────────
 info(f"DELETE /v1/documents/{document_id}")
-r = requests.delete(f"{DOCUMENT_API}/v1/documents/{document_id}", timeout=10)
+r = requests.delete(
+    f"{DOCUMENT_API}/v1/documents/{document_id}",
+    headers={"X-User-Id": UPLOADER_USER_ID},
+    timeout=10,
+)
 if r.status_code == 200 and r.json().get("ok"):
     ok(f"DELETE 成功  → ok=true")
 else:
@@ -102,7 +111,11 @@ else:
 
 # ── 6. 確認 GET → 404 ────────────────────────────────────────
 info(f"GET /v1/documents/{document_id}（預期 404）")
-r = requests.get(f"{DOCUMENT_API}/v1/documents/{document_id}", timeout=10)
+r = requests.get(
+    f"{DOCUMENT_API}/v1/documents/{document_id}",
+    headers={"X-User-Id": UPLOADER_USER_ID},
+    timeout=10,
+)
 if r.status_code == 404:
     ok("刪除後 GET → 404 正確")
 else:

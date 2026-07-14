@@ -24,7 +24,13 @@ if not os.path.exists(TEST_PDF):
     fail(f"測試 PDF 不存在：{TEST_PDF}")
     summary()
 
-ACL_HEADERS = {"X-Acl-Secret": ACL_ADMIN_SECRET, "Content-Type": "application/json"}
+UPLOADER_USER_ID = USERS["u001"]
+
+info(f"找出 u001 所屬部門（{DEPT_A}）的根資料夾 node_id")
+PARENT_FOLDER_ID = find_root_folder_id(UPLOADER_USER_ID, DEPT_A)
+if not PARENT_FOLDER_ID:
+    fail(f"找不到部門 '{DEPT_A}' 的根資料夾")
+    summary()
 
 
 # ── 輔助：產生最小合法 PDF（只含一行純文字）───────────────────────
@@ -75,18 +81,23 @@ def _make_synthetic_pdf(path: str, label: str) -> None:
 # ── 輔助：上傳並等待完成 ─────────────────────────────────────────
 def upload_and_wait(pdf_path, title, document_id=None, max_wait=300):
     """上傳 PDF 並輪詢至 done / failed。
-    document_id=None → 建立新文件；傳入既有 document_id → 該文件的新版本。
+    document_id=None → 建立新文件（需要 parent_folder_id，新文件會繼承該
+    資料夾的 ACL）；傳入既有 document_id → 該文件的新版本（維持原本位置，
+    parent_folder_id 會被忽略）。
     回傳 (document_id, job_id, elapsed_sec)；失敗回傳 (None, None, elapsed)。
     """
     data = {"title": title}
     if document_id:
         data["document_id"] = document_id
+    else:
+        data["parent_folder_id"] = PARENT_FOLDER_ID
 
     with open(pdf_path, "rb") as f:
         r = requests.post(
             f"{DOCUMENT_API}/v1/documents/upload",
             files={"file": (os.path.basename(pdf_path), f, "application/pdf")},
             data=data,
+            headers={"X-User-Id": UPLOADER_USER_ID},
             timeout=30,
         )
     if r.status_code != 200:
@@ -102,7 +113,11 @@ def upload_and_wait(pdf_path, title, document_id=None, max_wait=300):
 
     elapsed = 0
     while elapsed < max_wait:
-        rj = requests.get(f"{DOCUMENT_API}/v1/documents/job/{job_id}", timeout=10)
+        rj = requests.get(
+            f"{DOCUMENT_API}/v1/documents/job/{job_id}",
+            headers={"X-User-Id": UPLOADER_USER_ID},
+            timeout=10,
+        )
         j = rj.json()
         status = j.get("status")
         if status == "done":
@@ -119,7 +134,11 @@ def upload_and_wait(pdf_path, title, document_id=None, max_wait=300):
 
 
 def get_doc_meta(document_id):
-    r = requests.get(f"{DOCUMENT_API}/v1/documents/{document_id}", timeout=10)
+    r = requests.get(
+        f"{DOCUMENT_API}/v1/documents/{document_id}",
+        headers={"X-User-Id": UPLOADER_USER_ID},
+        timeout=10,
+    )
     if r.status_code != 200:
         fail(f"GET /v1/documents/{document_id} → HTTP {r.status_code}")
         return None
@@ -163,17 +182,8 @@ sha1 = meta1.get("content_sha256", "?")
 ok(f"初次 → version={v1}  document_id={did1}")
 info(f"content_sha256={sha1[:16]}…")
 
-# 設 ACL 讓 search 可搜尋
-requests.post(
-    f"{DOCUMENT_API}/v1/acl/write-map",
-    headers=ACL_HEADERS,
-    json={
-        "document_id": did1,
-        "access_rules": [{"principal_type": "user", "principal_id": USERS["u001"], "effect": "detail"}],
-    },
-    timeout=10,
-)
-
+# 不需要另外設 ACL：新文件預設 inherit_acl=true，已透過 PARENT_FOLDER_ID
+# 繼承部門資料夾的 query 權限（u001 是該部門成員）。
 hits_v1 = search_hits(did1)
 info(f"初次上傳後搜尋 hits={hits_v1}")
 

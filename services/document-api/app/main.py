@@ -4,9 +4,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from app.routers.acl import router as acl_router
 from app.routers.departments import router as departments_router
 from app.routers.documents import router as documents_router
+from app.routers.nodes import router as nodes_router
 
 
 def create_app() -> FastAPI:
@@ -23,8 +23,8 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(documents_router, prefix="/v1")
-    app.include_router(acl_router, prefix="/v1")
     app.include_router(departments_router, prefix="/v1")
+    app.include_router(nodes_router, prefix="/v1")
 
     @app.get("/healthz")
     def health():

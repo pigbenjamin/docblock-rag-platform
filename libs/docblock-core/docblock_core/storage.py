@@ -51,6 +51,13 @@ class LocalFileStorage:
 
         return final_path
 
+    def delete_document(self, *, tenant_id: str, document_id: str) -> None:
+        """Remove every stored version of a document (hard delete)."""
+        shutil.rmtree(self.base_dir / tenant_id / document_id, ignore_errors=True)
+
+    def version_dir(self, *, tenant_id: str, document_id: str, version: int) -> Path:
+        return self.base_dir / tenant_id / document_id / f"v{version}"
+
     def prune_old_versions(self, *, tenant_id: str, document_id: str, keep: int) -> None:
         """Delete version directories beyond the newest `keep`, e.g. after a
         successful finalize bumps the active version."""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List
 
 import httpx
@@ -27,11 +28,15 @@ async def _get_admin_token() -> str:
 @router.get("")
 async def list_departments() -> List[Dict[str, Any]]:
     """
-    Top-level Keycloak groups (A/B/C/...) = departments, for a frontend
-    dropdown. Read-only and purely informational - it does not participate
-    in any authorization decision, which always queries `user_principal`
-    instead. Reuses the same `user-sync-service` Keycloak client
-    webhook-service already has credentials for.
+    Top-level Keycloak groups that have a 'KM' subgroup, for a frontend
+    dropdown (D2). A group only counts as a department if it structurally
+    looks like one (has a KM child group) - this deliberately doesn't
+    hardcode department names, so it also filters out top-level groups like
+    'Public' (a shared root folder open to every department, not itself a
+    department - see the node-tree migration). Read-only and purely
+    informational: no authorization decision ever consults this list, only
+    `user_principal` / `acl_entries`. Reuses the same `user-sync-service`
+    Keycloak client webhook-service already has credentials for.
     """
     token = await _get_admin_token()
     async with httpx.AsyncClient(verify=settings.keycloak.verify) as client:
@@ -50,6 +55,21 @@ async def list_departments() -> List[Dict[str, Any]]:
                 ),
             )
         resp.raise_for_status()
+        groups = [g for g in resp.json() if g.get("id")]
 
-    groups = resp.json()
-    return [{"id": g.get("id"), "name": g.get("name")} for g in groups]
+        async def _has_km_subgroup(group_id: str) -> bool:
+            children_resp = await client.get(
+                f"{settings.keycloak.url}/admin/realms/{settings.keycloak.realm}/groups/{group_id}/children",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"briefRepresentation": "true"},
+            )
+            children_resp.raise_for_status()
+            return any(c.get("name") == "KM" for c in children_resp.json())
+
+        has_km = await asyncio.gather(*[_has_km_subgroup(g["id"]) for g in groups])
+
+    return [
+        {"id": g["id"], "name": g.get("name")}
+        for g, km in zip(groups, has_km)
+        if km
+    ]

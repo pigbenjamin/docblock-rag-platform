@@ -3,7 +3,7 @@
 The module purpose is to centralize common DB tasks so callers don't
 repeat connection/transaction/sequence logic and to provide small,
 well-documented helpers for operations like syncing serial sequences
-and safely inserting into `document_acl`.
+and bulk-inserting chunk rows.
 
 This file is intentionally small and dependency-light so it's easy to
 mock in unit tests.
@@ -27,15 +27,9 @@ __all__ = [
     "transaction",
     "execute_values",
     "reset_serial_sequence",
-    "safe_insert_document_acl",
-    "upsert_document_acl",
-    "document_exists",
     "insert_text_chunks",
     "insert_table_chunks",
     "insert_image_chunks",
-    "insert_summary_chunk",
-    "delete_document_acl",
-    "upsert_document_sum",
 ]
 
 
@@ -108,18 +102,6 @@ def reset_serial_sequence(conn: psycopg2.extensions.connection, table: str, pk_c
         cur.execute("SELECT setval(%s, %s, false)", (seq_name, new_val))
         conn.commit()
         logger.info("reset sequence %s to %s", seq_name, new_val)
-
-
-def document_exists(cur, tenant_id: str, document_id: str) -> bool:
-    """Check if a UUID document_id exists in the documents table.
-
-    Returns True if found, False otherwise.
-    """
-    cur.execute(
-        "SELECT 1 FROM documents WHERE tenant_id = %s AND document_id = %s LIMIT 1",
-        (tenant_id, document_id),
-    )
-    return cur.fetchone() is not None
 
 
 # for text/table/image chunk upsert in docblock-rag app
@@ -215,169 +197,6 @@ def insert_image_chunks(cur, rows: Sequence[Sequence[Any]]) -> None:
         execute_values(cur, sql, rows, template=template)
 
 
-def insert_summary_chunk(cur, tenant_id: str, document_id: str, version: int, summary_text: str, metadata_json: str, embedding: str) -> None:
-        """Insert or update a single row into `summary_chunks`.
-
-        - `metadata_json` should be a JSON string (already dumped).
-        - `embedding` should be the PostgreSQL vector literal string (e.g. "[0.1,0.2,...]").
-        """
-        cur.execute(
-                """
-                INSERT INTO summary_chunks (
-                    tenant_id, document_id, version,
-                    summary_text, searchable_text, metadata, embedding
-                )
-                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::vector)
-                ON CONFLICT (tenant_id, document_id) DO UPDATE
-                SET
-                    version = EXCLUDED.version,
-                    summary_text = EXCLUDED.summary_text,
-                    searchable_text = EXCLUDED.searchable_text,
-                    metadata = EXCLUDED.metadata,
-                    embedding = EXCLUDED.embedding,
-                    updated_at = now()
-                """,
-                (tenant_id, document_id, version, summary_text, summary_text, metadata_json, embedding),
-        )
-
-
-def upsert_document_sum(
-        cur,
-        *,
-        tenant_id: str,
-        document_id: str,
-        semantic_summary: str,
-        retrieval_summary_json: str,
-        metadata_json: str,
-        summary_embedding: Optional[str],
-        retrieval_embedding: Optional[str],
-) -> None:
-        """Upsert a row into document_sum.
-
-        - `retrieval_summary_json` and `metadata_json` must be JSON strings.
-        - `retrieval_embedding` should be a vector literal string or None.
-        """
-        cur.execute(
-                """
-                INSERT INTO document_sum (
-                    tenant_id,
-                    document_id,
-                    semantic_summary,
-                    retrieval_summary,
-                    metadata,
-                    summary_embedding,
-                    retrieval_embedding,
-                    updated_at
-                ) VALUES (
-                    %s,
-                    %s,
-                    %s,
-                    %s::jsonb,
-                    %s::jsonb,
-                    %s,
-                    %s,
-                    now()
-                )
-                ON CONFLICT (tenant_id, document_id)
-                DO UPDATE SET
-                    semantic_summary = EXCLUDED.semantic_summary,
-                    retrieval_summary = EXCLUDED.retrieval_summary,
-                    metadata = EXCLUDED.metadata,
-                    retrieval_embedding = EXCLUDED.retrieval_embedding,
-                    updated_at = now();
-                """,
-                (
-                        tenant_id,
-                        document_id,
-                        semantic_summary,
-                        retrieval_summary_json,
-                        metadata_json,
-                        summary_embedding,
-                        retrieval_embedding,
-                ),
-        )
-
-
-# for document acl in webhook
-def safe_insert_document_acl(
-    cur,
-    tenant_id: str,
-    document_id: str,
-    principal_type: str,
-    principal_id: str,
-    effect: str,
-) -> bool:
-    """Insert a row into `document_acl` using ON CONFLICT DO NOTHING.
-
-    Returns True if the row was inserted, False if it already existed.
-    """
-    cur.execute(
-        """
-        INSERT INTO document_acl (tenant_id, document_id, principal_type, principal_id, effect)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (tenant_id, document_id, principal_type, principal_id) DO NOTHING
-        RETURNING 1
-        """,
-        (tenant_id, document_id, principal_type, principal_id, effect),
-    )
-    row = cur.fetchone()
-    return bool(row)
-
-
-def upsert_document_acl(
-    cur,
-    tenant_id: str,
-    document_id: str,
-    principal_type: str,
-    principal_id: str,
-    effect: str,
-) -> bool:
-    """
-    Insert or update a row in `document_acl` using ON CONFLICT DO UPDATE.
-    If a row with the same tenant_id, document_id, principal_type, and principal_id already exists, it will update the effect and updated_at timestamp.
-    """
-    cur.execute(
-        """
-        INSERT INTO document_acl (
-            tenant_id,
-            document_id,
-            principal_type,
-            principal_id,
-            effect,
-            created_at,
-            updated_at
-        )
-        VALUES (
-            %s, %s, %s, %s, %s, now(), now()
-        )
-        ON CONFLICT (tenant_id, document_id, principal_type, principal_id)
-        DO UPDATE SET
-            effect = EXCLUDED.effect,
-            updated_at = now()
-        RETURNING 1;
-        """,
-        (tenant_id, document_id, principal_type, principal_id, effect)
-    )
-    row = cur.fetchone()
-    return bool(row)
-
-
-def delete_document_acl(cur, tenant_id: str, document_id: str, principal_type: str, principal_id: str) -> int:
-        """Delete document_acl rows for the given tenant/document/principal.
-
-        Returns the number of rows deleted (cur.rowcount).
-        """
-        cur.execute(
-                """
-                DELETE FROM document_acl
-                WHERE tenant_id = %s AND document_id = %s
-                    AND principal_type = %s AND principal_id = %s
-                """,
-                (tenant_id, document_id, principal_type, principal_id),
-        )
-        return cur.rowcount
-    
-    
 # for keycloak user sync in webhook
 def update_user(cur, user: dict):
     """將從 Keycloak 獲取的使用者資料更新到 PostgreSQL 資料庫中"""

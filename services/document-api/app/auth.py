@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 import httpx
 import jwt
@@ -11,9 +11,32 @@ from jwt.algorithms import RSAAlgorithm
 from fastapi import Header, HTTPException
 
 from app.config import settings
-from docblock_core.acl import ACLService
+from docblock_core.authz import NodeAuthz, UserAuthzContext
 
-_acl = ACLService(pg_dsn=settings.db.pg_dsn, tenant_id=settings.db.tenant_id)
+_node_authz = NodeAuthz(pg_dsn=settings.db.pg_dsn, tenant_id=settings.db.tenant_id)
+
+
+def node_authz() -> NodeAuthz:
+    return _node_authz
+
+
+def require_node_action(
+    user_id: str,
+    node_id: str,
+    action: str,
+    *,
+    ctx: Optional[UserAuthzContext] = None,
+) -> None:
+    """Raise 404 when the node doesn't exist, 403 when `action` is denied.
+
+    Node-tree replacement for require_document_km: evaluates acl_entries up
+    the folder tree (owner-department KM always passes, see docblock_core.authz).
+    """
+    allowed = _node_authz.evaluate_one(user_id=user_id, action=action, node_id=node_id, ctx=ctx)
+    if allowed is None:
+        raise HTTPException(status_code=404, detail=f"node '{node_id}' not found")
+    if not allowed:
+        raise HTTPException(status_code=403, detail=f"requires '{action}' permission on node {node_id}")
 
 _JWKS_TTL_SECONDS = 600
 _jwks_cache: Dict[str, Any] = {"keys": [], "fetched_at": 0.0}
@@ -163,44 +186,3 @@ def get_current_user_id_or_admin_secret(
         return None
 
     return get_current_user_id(authorization=authorization, x_user_id=x_user_id)
-
-
-def user_has_department_km(user_id: str, department: str) -> bool:
-    principals = _acl.fetch_user_principals(user_id)
-    return ("role", f"dept:{department}:role:KM") in principals
-
-
-def require_department_km(user_id: str, departments: Sequence[str], *, mode: str = "any") -> None:
-    """mode='any' -> caller must be KM of at least one department; 'all' -> every one."""
-    if not departments:
-        raise HTTPException(status_code=403, detail="no department to authorize against")
-
-    checks = [user_has_department_km(user_id, d) for d in departments]
-    satisfied = any(checks) if mode == "any" else all(checks)
-    if not satisfied:
-        quantifier = "any of" if mode == "any" else "all of"
-        raise HTTPException(
-            status_code=403,
-            detail=f"requires KM role in {quantifier}: {list(departments)}",
-        )
-
-
-def managing_departments(document_id: str) -> List[str]:
-    """Departments that own (can manage) a document.
-
-    A department's ACL row on a document only carries management rights when
-    `effect == 'detail'` - the level written at upload time for the
-    departments the document was filed under. Departments added later via
-    sharing are written as 'summary' and are view-only.
-    """
-    rows = _acl.list_document_access(document_id=document_id)
-    return [
-        r["principal_id"]
-        for r in rows
-        if r["principal_type"] == "department" and r["effect"] == "detail"
-    ]
-
-
-def require_document_km(user_id: str, document_id: str) -> None:
-    """Require KM role in at least one of the document's owning (detail) departments."""
-    require_department_km(user_id, managing_departments(document_id), mode="any")

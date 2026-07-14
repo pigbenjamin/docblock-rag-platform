@@ -6,11 +6,13 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from docblock_core.config import settings
-from docblock_core.acl import fetch_doc_access_for_user
+from docblock_core.authz import NodeAuthz, list_document_ids
 from docblock_core.search import DocblockSearchClient, SearchHit
 from docblock_core.rag import RagClient
 
 router = APIRouter(tags=["search"])
+
+_node_authz = NodeAuthz(pg_dsn=settings.db.pg_dsn, tenant_id=settings.db.tenant_id)
 
 
 def _sc(request: Request) -> DocblockSearchClient:
@@ -58,38 +60,33 @@ class AnswerRequest(BaseModel):
     document_id: str
     question: str
     user_id: str
-    document_ids: Optional[List[str]] = None
     top_k: int = 10
     routing: bool = True
 
 
 @router.post("/search")
 def search(req: SearchRequest, request: Request) -> Dict[str, Any]:
-    """ACL-enforced cross-document semantic search."""
+    """ACL-enforced cross-document semantic search (query permission, allow/deny)."""
     tenant_id = settings.db.tenant_id
 
-    access_map, principals = fetch_doc_access_for_user(
+    candidates = list_document_ids(
         pg_dsn=settings.db.pg_dsn,
         tenant_id=tenant_id,
-        user_id=req.user_id,
         candidate_document_ids=req.document_ids,
         limit=req.max_docs,
     )
-
-    allowed = [d for d, a in access_map.items() if a in ("detail", "summary")]
+    allowed = _node_authz.filter_allowed(user_id=req.user_id, action="query", node_ids=candidates)
     if not allowed:
         return {
             "query": req.query,
-            "user": {"user_id": req.user_id, "principals": principals},
+            "user_id": req.user_id,
             "document_ids_used": [],
-            "access": dict(access_map),
             "hits": [],
             "note": "No documents available after ACL filtering.",
         }
 
     res = _sc(request).multi_search(
         document_ids=allowed,
-        access_map=access_map,
         query=req.query,
         top_k=req.top_k,
         top_k_per_doc=req.top_k_per_doc,
@@ -102,9 +99,8 @@ def search(req: SearchRequest, request: Request) -> Dict[str, Any]:
     hits = res.get("hits", []) or []
     return {
         "query": req.query,
-        "user": {"user_id": req.user_id, "principals": principals},
+        "user_id": req.user_id,
         "document_ids_used": res.get("document_ids_used", allowed),
-        "access": dict(access_map),
         "routing": res.get("routing", {}),
         "hits": [_hit_to_dict(h, i + 1, req.preview_chars) for i, h in enumerate(hits)],
     }
@@ -112,22 +108,14 @@ def search(req: SearchRequest, request: Request) -> Dict[str, Any]:
 
 @router.post("/answer")
 def answer(req: AnswerRequest, request: Request) -> Dict[str, Any]:
-    """ACL-enforced single-document RAG answer with citations."""
-    tenant_id = settings.db.tenant_id
-
-    access_map, principals = fetch_doc_access_for_user(
-        pg_dsn=settings.db.pg_dsn,
-        tenant_id=tenant_id,
-        user_id=req.user_id,
-        candidate_document_ids=req.document_ids,
-        limit=5000,
-    )
-
-    access = access_map.get(req.document_id, "deny")
-    if access == "deny":
+    """ACL-enforced single-document RAG answer with citations (query permission)."""
+    allowed = _node_authz.evaluate_one(user_id=req.user_id, action="query", node_id=req.document_id)
+    if allowed is None:
+        raise HTTPException(status_code=404, detail=f"document_id='{req.document_id}' not found")
+    if not allowed:
         raise HTTPException(
             status_code=403,
-            detail=f"ACL_DENY: user '{req.user_id}' has no access to document_id='{req.document_id}'",
+            detail=f"ACL_DENY: user '{req.user_id}' has no query access to document_id='{req.document_id}'",
         )
 
     result = _rag(request).generate(
@@ -156,7 +144,6 @@ def answer(req: AnswerRequest, request: Request) -> Dict[str, Any]:
         "context": result.context,
         "citations": citations,
         "model": result.model,
-        "user": {"user_id": req.user_id, "principals": principals},
+        "user_id": req.user_id,
         "document_id": req.document_id,
-        "document_id_access": access,
     }

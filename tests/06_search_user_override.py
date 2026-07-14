@@ -1,16 +1,18 @@
 """
 06 ACL User Override — 優先順序驗證
-聚焦在「user 規則覆蓋 department 規則」的核心場景：
+聚焦在「user 規則覆蓋 department 規則」的核心場景，新模型下用同一節點的
+acl_entries 表達：同節點內 user-type entry 比 department-type entry 優先
+（見 docblock_core/authz.py 的判定規則）。
 
-  test-eurfood ACL:
-    dept-A = detail    （u001, u002 所屬部門）
-    user u002 = deny   ← user(30) > department(10)，deny 優先
+跟舊版一樣，測試自己動態寫入/修改 ACL，不依賴預先存在的 fixture 狀態：
 
-  測試步驟：
-  1. u001（dept-A，無 user 規則） → 應拿到 detail
-  2. u002（dept-A，user=deny）   → 應拿到 deny，即使 dept-A=detail
-  3. 動態修改 u002 的 user 規則為 summary，再搜尋 → 應拿到 summary
-  4. 還原 u002 的 user 規則為 deny
+  1. 建立初始狀態：DEPT_A=allow，user u002=deny
+  2. u001（無 user 覆蓋） → 應可見
+  3. u002（user=deny）    → 應不可見，即使 DEPT_A=allow
+  4. 動態把 u002 的規則改成 allow → 應變可見
+  5. 動態改回 deny → 應變不可見
+  6. 全程確認 u001 不受影響
+  7. 還原：清空 entries
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
@@ -19,12 +21,13 @@ from config import *
 
 header("06  ACL User Override — 優先順序驗證")
 
-ACL_HEADERS = {"X-Acl-Secret": ACL_ADMIN_SECRET, "Content-Type": "application/json"}
 TARGET_DOC   = "test-eurfood"
 TARGET_UUID  = EXISTING_DOCS[TARGET_DOC]
 QUERY        = "European food regulation"
+OWNER_KM_USER = USERS["u001"]  # 假設是這份文件所在部門（A）的 KM
 
-def search_access(user_id):
+
+def is_visible(user_id):
     r = requests.post(
         f"{RETRIEVE_API}/v1/search",
         json={"query": QUERY, "user_id": user_id, "document_ids": [TARGET_UUID], "top_k": 5},
@@ -33,67 +36,80 @@ def search_access(user_id):
     if r.status_code != 200:
         return None, f"HTTP {r.status_code}"
     data = r.json()
-    access = data.get("access", {}).get(TARGET_UUID, "unknown")
-    hits   = len(data.get("hits", []))
-    return access, hits
+    used = set(data.get("document_ids_used", []))
+    hits = len(data.get("hits", []))
+    return (TARGET_UUID in used), hits
 
-def write_user_rule(user_id, effect):
-    r = requests.post(
-        f"{DOCUMENT_API}/v1/acl/write-map",
-        headers=ACL_HEADERS,
-        json={
-            "document_id": TARGET_UUID,
-            "access_rules": [{"principal_type": "user", "principal_id": user_id, "effect": effect}],
-        },
-        timeout=10,
-    )
-    return r.status_code == 200 and r.json().get("ok")
 
-# ── 1. u001：dept-A=detail，無 user 規則 → detail ─────────────
-info("場景 1：u001（dept-A=detail，無 user 規則）")
-access, hits = search_access(USERS["u001"])
-if access == "detail":
-    ok(f"u001  access={access}  hits={hits}")
+def set_u002_rule(effect):
+    entries = [
+        {"subject_type": "department", "subject_id": DEPT_A, "actions": ["browse", "query", "read"], "effect": "allow"},
+        {"subject_type": "user", "subject_id": USERS["u002"], "actions": ["browse", "query", "read"], "effect": effect},
+    ]
+    r = write_node_acl(TARGET_UUID, OWNER_KM_USER, entries)
+    return r.status_code == 200
+
+
+# ── 0. 建立初始狀態：DEPT_A=allow，u002=deny ─────────────────
+info("建立初始狀態：DEPT_A=allow，u002=deny")
+if not set_u002_rule("deny"):
+    fail("建立初始 ACL 狀態失敗")
+    summary()
+ok("初始狀態已建立")
+
+# ── 1. u001：無 user 規則 → 應可見 ─────────────────────────────
+info("場景 1：u001（DEPT_A=allow，無 user 規則）")
+visible, hits = is_visible(USERS["u001"])
+if visible:
+    ok(f"u001  可見={visible}  hits={hits}")
 else:
-    fail(f"u001  預期 detail，got={access}")
+    fail(f"u001  預期可見，got 可見={visible}")
 
-# ── 2. u002：dept-A=detail，user=deny → deny ─────────────────
-info("場景 2：u002（dept-A=detail，but user=deny）")
-access, hits = search_access(USERS["u002"])
-if access == "deny" and hits == 0:
-    ok(f"u002  access={access}  hits={hits}  user 覆蓋 dept 成功")
+# ── 2. u002：DEPT_A=allow，user=deny → 應不可見 ────────────────
+info("場景 2：u002（DEPT_A=allow，but user=deny）")
+visible, hits = is_visible(USERS["u002"])
+if visible is False and hits == 0:
+    ok(f"u002  可見={visible}  hits={hits}  user 覆蓋 dept 成功")
 else:
-    fail(f"u002  預期 deny/0 hits，got access={access} hits={hits}")
+    fail(f"u002  預期不可見/0 hits，got 可見={visible} hits={hits}")
 
-# ── 3. 動態修改 u002 user 規則為 summary → 應變 summary ──────
-info("場景 3：動態改 u002 user 規則 deny→summary")
-if write_user_rule(USERS["u002"], "summary"):
-    ok("write-map u002=summary 成功")
-    access, hits = search_access(USERS["u002"])
-    if access == "summary":
-        ok(f"u002 改規則後  access={access}  hits={hits}  優先順序正確")
+# ── 3. 動態修改 u002 規則為 allow → 應變可見 ──────────────────
+info("場景 3：動態改 u002 規則 deny→allow")
+if set_u002_rule("allow"):
+    ok("PUT acl u002=allow 成功")
+    visible, hits = is_visible(USERS["u002"])
+    if visible:
+        ok(f"u002 改規則後  可見={visible}  hits={hits}  優先順序正確")
     else:
-        fail(f"u002 改規則後  預期 summary，got={access}")
+        fail(f"u002 改規則後  預期可見，got 可見={visible}")
 else:
-    fail("write-map u002=summary 失敗")
+    fail("PUT acl u002=allow 失敗")
 
-# ── 4. 還原 u002 user 規則為 deny ────────────────────────────
-info("場景 4：還原 u002 user 規則為 deny")
-if write_user_rule(USERS["u002"], "deny"):
-    access, hits = search_access(USERS["u002"])
-    if access == "deny":
-        ok(f"u002 還原後  access={access}  hits={hits}")
+# ── 4. 還原 u002 規則為 deny ──────────────────────────────────
+info("場景 4：還原 u002 規則為 deny")
+if set_u002_rule("deny"):
+    visible, hits = is_visible(USERS["u002"])
+    if visible is False:
+        ok(f"u002 還原後  可見={visible}  hits={hits}")
     else:
-        fail(f"u002 還原後  預期 deny，got={access}")
+        fail(f"u002 還原後  預期不可見，got 可見={visible}")
 else:
-    fail("write-map u002=deny 失敗（還原失敗）")
+    fail("PUT acl u002=deny 失敗（還原失敗）")
 
-# ── 5. 確認 u001 不受影響 ────────────────────────────────────
+# ── 5. 確認 u001 不受影響 ─────────────────────────────────────
 info("場景 5：確認 u001 不受 u002 規則變更影響")
-access, hits = search_access(USERS["u001"])
-if access == "detail":
-    ok(f"u001 不受影響  access={access}  hits={hits}")
+visible, hits = is_visible(USERS["u001"])
+if visible:
+    ok(f"u001 不受影響  可見={visible}  hits={hits}")
 else:
-    fail(f"u001 受到影響  access={access}（預期 detail）")
+    fail(f"u001 受到影響  可見={visible}（預期仍可見）")
+
+# ── 還原：清空 entries，回到純繼承 ────────────────────────────
+info("清空測試 ACL entries")
+r = write_node_acl(TARGET_UUID, OWNER_KM_USER, [])
+if r.status_code == 200:
+    ok("已還原為純繼承")
+else:
+    fail(f"還原失敗 → HTTP {r.status_code}  body={r.text[:200]}")
 
 summary()
