@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """NodeAuthz(docblock_core/authz.py)單元測試。
 
-需要一個已套用 deployments/docker/postgres/init/01_schema.sql 的 PostgreSQL;
-fixture 全部寫在 tenant 'authz-test' 底下,開頭先清掉同 tenant 舊資料,
-可重複執行,不影響其他 tenant。
+需要一個已套用 deployments/docker/postgres/init/01_schema.sql 的 PostgreSQL
+(FB-6 起含 department_admins / global_admins 兩張表);fixture 全部寫在
+tenant 'authz-test' 底下,開頭先清掉同 tenant 舊資料,可重複執行,
+不影響其他 tenant。
 
 用法:
   AUTHZ_TEST_PG_DSN=postgresql://postgres:test@127.0.0.1:15433/docblock \
@@ -24,9 +25,12 @@ fixture 全部寫在 tenant 'authz-test' 底下,開頭先清掉同 tenant 舊資
                     dept B allow browse/query/read
     doc5            user u1 allow browse/query/read;user u2 deny query
     doc6            dept B deny query;user u2 allow query   <- user > dept
+                    role dept:A:role:KM allow read          <- 共管慣例(合成 role)
     doc7            dept B deny query;dept B2 allow query   <- 同類 deny > allow
 
-  u1=A員+A的KM  u2=B員  u3=C員  u4=A員(非KM)  u6=B+B2員
+  u1=A員+A的管理員(department_admins)  u2=B員  u3=C員(user_principal 殘留
+  一列舊 dept:B:role:KM role row,FB-6 起必須被忽略)  u4=A員(非管理員)
+  u6=B+B2員  u7=全域管理員(global_admins,不屬於任何部門)
 """
 from __future__ import annotations
 
@@ -49,6 +53,7 @@ U2 = "00000000-0000-0000-0000-000000000002"
 U3 = "00000000-0000-0000-0000-000000000003"
 U4 = "00000000-0000-0000-0000-000000000004"
 U6 = "00000000-0000-0000-0000-000000000006"
+U7 = "00000000-0000-0000-0000-000000000007"
 
 FA = "10000000-0000-0000-0000-00000000000a"  # /A
 FS = "10000000-0000-0000-0000-00000000000b"  # /A/sub
@@ -91,24 +96,33 @@ def setup_fixture() -> None:
         (D5, "user", U2, ["query"], "deny", True),
         (D6, "department", "B", ["query"], "deny", True),
         (D6, "user", U2, ["query"], "allow", True),
+        (D6, "role", "dept:A:role:KM", ["read"], "allow", True),
         (D7, "department", "B", ["query"], "deny", True),
         (D7, "department", "B2", ["query"], "allow", True),
     ]
     principals = [
         (U1, "department", "A"),
-        (U1, "role", "dept:A:role:KM"),
         (U2, "department", "B"),
         (U3, "department", "C"),
+        # 舊 KM 子群組結構的殘留 role row:FB-6 起 fetch_user_context 不讀
+        # user_principal 的 role rows,這列不能讓 u3 變成 B 的管理員
+        (U3, "role", "dept:B:role:KM"),
         (U4, "department", "A"),
         (U6, "department", "B"),
         (U6, "department", "B2"),
     ]
+    department_admins = [
+        ("A", U1),
+    ]
+    global_admins = [U7]
 
     with psycopg2.connect(PG_DSN) as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM acl_entries WHERE tenant_id = %s", (TENANT,))
             cur.execute("DELETE FROM nodes WHERE tenant_id = %s", (TENANT,))
             cur.execute("DELETE FROM user_principal WHERE tenant_id = %s", (TENANT,))
+            cur.execute("DELETE FROM department_admins WHERE tenant_id = %s", (TENANT,))
+            cur.execute("DELETE FROM global_admins WHERE tenant_id = %s", (TENANT,))
             for nid, parent, ntype, name, owner, inherit in nodes:
                 cur.execute(
                     """INSERT INTO nodes (id, tenant_id, parent_id, node_type, name,
@@ -131,6 +145,18 @@ def setup_fixture() -> None:
                                                    principal_id)
                        VALUES (%s,%s,%s,%s)""",
                     (TENANT, uid, ptype, pid),
+                )
+            for dept, uid in department_admins:
+                cur.execute(
+                    """INSERT INTO department_admins (tenant_id, department, user_id)
+                       VALUES (%s,%s,%s)""",
+                    (TENANT, dept, uid),
+                )
+            for uid in global_admins:
+                cur.execute(
+                    """INSERT INTO global_admins (tenant_id, user_id)
+                       VALUES (%s,%s)""",
+                    (TENANT, uid),
                 )
 
 
@@ -159,6 +185,14 @@ CASES = [
     ("dept deny(無 user 規則)", U6, "query", D6, False),
     ("同類主體 deny > allow(多部門使用者)", U6, "query", D7, False),
     ("depth0 無 browse 規則 -> 上層 allow", U6, "browse", D7, True),
+    # --- FB-6: department_admins / global_admins ---
+    ("owner-KM 來源=department_admins 表", U1, "upload", FA, True),
+    ("user_principal 殘留 role row 被忽略(u3 非 B 管理員)", U3, "delete", D5, False),
+    ("合成 role principal 匹配共管 role entry", U1, "read", D6, True),
+    ("role entry 只給列出的 action(對照組)", U4, "read", D6, False),
+    ("全域管理員:無任何 entry 也全放行", U7, "manage_acl", FA, True),
+    ("全域管理員:deny 蓋不掉", U7, "browse", D3, True),
+    ("全域管理員:不是部門成員也能 query", U7, "query", D5, True),
 ]
 
 
@@ -188,13 +222,29 @@ def main() -> int:
     failed += 0 if ok else 1
     print(f"{'PASS' if ok else 'FAIL'}: filter_allowed 保序去重 (got {got_list})")
 
-    # ctx 重用路徑
+    # ctx 重用路徑(km_departments 由 department_admins 合成)
     ctx = authz.fetch_user_context(U1)
-    ok = ctx.km_departments == ["A"] and authz.evaluate_one(
+    ok = ctx.km_departments == ["A"] and not ctx.is_global_admin and authz.evaluate_one(
         user_id=U1, action="delete", node_id=D1, ctx=ctx
     )
     failed += 0 if ok else 1
     print(f"{'PASS' if ok else 'FAIL'}: fetch_user_context + ctx 重用 (km={ctx.km_departments})")
+
+    # 殘留 role row 不進 ctx;全域管理員 flag 正確
+    ctx3 = authz.fetch_user_context(U3)
+    ctx7 = authz.fetch_user_context(U7)
+    ok = (
+        ctx3.km_departments == [] and ctx3.role_principal_ids == []
+        and not ctx3.is_global_admin and ctx7.is_global_admin
+    )
+    failed += 0 if ok else 1
+    print(f"{'PASS' if ok else 'FAIL'}: ctx 旗標 (u3 km={ctx3.km_departments}, u7 global={ctx7.is_global_admin})")
+
+    # 全域管理員對不存在節點一樣回 None
+    got = authz.evaluate_one(user_id=U7, action="browse", node_id=BOGUS)
+    ok = got is None
+    failed += 0 if ok else 1
+    print(f"{'PASS' if ok else 'FAIL'}: 全域管理員不存在節點回 None (got {got})")
 
     # 未知 action
     try:
@@ -204,7 +254,7 @@ def main() -> int:
     except ValueError:
         print("PASS: 未知 action 拋 ValueError")
 
-    total = len(CASES) + 4
+    total = len(CASES) + 6
     print(f"\n{total - failed}/{total} passed")
     return 1 if failed else 0
 

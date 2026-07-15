@@ -30,8 +30,17 @@ class UserSyncService:
                 principals=principals,
             )
 
+            # 部門會隨 HR 連動動態出現：確保每個部門有根資料夾（含部門成員
+            # browse/query/read entries），且 Public 根對它 allow（D2）。
+            # 只增不減——部門消失時的清理是破壞性操作，留給管理員手動處理。
+            departments = sorted({
+                p["principal_id"] for p in principals
+                if p["principal_type"] == "department" and p["principal_id"] != "Public"
+            })
+            self.user_repository.ensure_department_infrastructure(departments)
+
         return user
-    
+
     def _build_principals(self, user: dict) -> list[dict]:
         principals = []
 
@@ -42,6 +51,10 @@ class UserSyncService:
             "principal_id": f"user:{user_id}",
         })
 
+        # FB-6 (D8/D10/D11): department = top-level group only. No role
+        # principals anymore - the Keycloak tree is HR-synced and multi-level,
+        # so path segment [1] is an org sub-unit (处/课), not a KM role;
+        # admin rosters live in the department_admins table instead.
         for group in user.get("raw_groups", []):
             path = group.get("path", "").strip("/")
             parts = path.split("/")
@@ -51,19 +64,9 @@ class UserSyncService:
 
                 principals.append({
                     "principal_type": "department",
-                    # NOTE: no "dept:" prefix here - document_acl stores the raw
-                    # department value (see ACLService.write_access._parse_principal),
-                    # and fetch_doc_access_map joins on principal_id equality.
+                    # NOTE: no "dept:" prefix - acl_entries stores the raw
+                    # department value and NodeAuthz compares on equality.
                     "principal_id": dept,
-                })
-
-            if len(parts) >= 2 and parts[0] and parts[1]:
-                dept = parts[0]
-                role = parts[1]
-
-                principals.append({
-                    "principal_type": "role",
-                    "principal_id": f"dept:{dept}:role:{role}",
                 })
 
         # 去重

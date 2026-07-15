@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Dict, List
 
 import httpx
@@ -28,15 +27,17 @@ async def _get_admin_token() -> str:
 @router.get("")
 async def list_departments() -> List[Dict[str, Any]]:
     """
-    Top-level Keycloak groups that have a 'KM' subgroup, for a frontend
-    dropdown (D2). A group only counts as a department if it structurally
-    looks like one (has a KM child group) - this deliberately doesn't
-    hardcode department names, so it also filters out top-level groups like
-    'Public' (a shared root folder open to every department, not itself a
-    department - see the node-tree migration). Read-only and purely
-    informational: no authorization decision ever consults this list, only
-    `user_principal` / `acl_entries`. Reuses the same `user-sync-service`
-    Keycloak client webhook-service already has credentials for.
+    Top-level Keycloak groups, for a frontend dropdown. Every top-level group
+    is a department (D10) - Keycloak is HR-synced, its tree is authoritative
+    and multi-level, but sub-units (处/课) are ignored in v1 (D11). The only
+    exception is 'Public': a shared root folder open to every department, not
+    itself a department. Department admins are NOT derived from this tree
+    anymore (no more KM subgroups) - they live in the platform's own
+    `department_admins` table (D8). Read-only and purely informational: no
+    authorization decision ever consults this list, only `user_principal` /
+    `department_admins` / `global_admins` / `acl_entries`. Reuses the same
+    `user-sync-service` Keycloak client webhook-service already has
+    credentials for.
     """
     token = await _get_admin_token()
     async with httpx.AsyncClient(verify=settings.keycloak.verify) as client:
@@ -55,21 +56,9 @@ async def list_departments() -> List[Dict[str, Any]]:
                 ),
             )
         resp.raise_for_status()
-        groups = [g for g in resp.json() if g.get("id")]
-
-        async def _has_km_subgroup(group_id: str) -> bool:
-            children_resp = await client.get(
-                f"{settings.keycloak.url}/admin/realms/{settings.keycloak.realm}/groups/{group_id}/children",
-                headers={"Authorization": f"Bearer {token}"},
-                params={"briefRepresentation": "true"},
-            )
-            children_resp.raise_for_status()
-            return any(c.get("name") == "KM" for c in children_resp.json())
-
-        has_km = await asyncio.gather(*[_has_km_subgroup(g["id"]) for g in groups])
 
     return [
         {"id": g["id"], "name": g.get("name")}
-        for g, km in zip(groups, has_km)
-        if km
+        for g in resp.json()
+        if g.get("id") and g.get("name") != "Public"
     ]

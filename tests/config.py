@@ -70,17 +70,16 @@ USERS = {
 }
 
 # ── 部門名稱 ────────────────────────────────────────────────
-# 2026-07-15 對 live k8s/dev DB 驗證確認：這個 DB 的 nodes/user_principal
-# 用的是舊版 "dept-A" 這種帶前綴寫法（FB-1 遷移沿用了舊 document_acl 的
-# department 字串），不是 /v1/departments（走 Keycloak 群組原始名稱）回傳的
-# 單一字母 "A"/"B"/"C"——這兩套命名目前並存、尚未統一，D10/FB-6 要處理
-# 部門偵測時得留意這個落差。
+# 2026-07-15（FB-6 前置）：dev DB 的部門命名已統一成 Keycloak 頂層群組
+# 原始名稱 "A"/"B"/"C"（原本 fixture 用舊版帶前綴的 "dept-A"，與 Keycloak
+# 命名並存；FB-6 遷移前已把 user_principal/nodes/acl_entries 全部改名，
+# webhook 同步進來的真實資料會無縫併入同一套資料夾）。
 #
 # u002-u005 的 department principal 缺口已補齊（dev DB user_principal 直接
-# 補資料）：u001/u002=dept-A、u003/u004=dept-B、u005=dept-C。04/05/06 現在
-# 是真的在驗證 department-level allow/deny，不是靠 default-deny 巧合通過。
-DEPT_A = os.getenv("TEST_DEPT_A", "dept-A")
-DEPT_B = os.getenv("TEST_DEPT_B", "dept-B")
+# 補資料）：u001/u002=A、u003/u004=B、u005=C。04/05/06 現在是真的在驗證
+# department-level allow/deny，不是靠 default-deny 巧合通過。
+DEPT_A = os.getenv("TEST_DEPT_A", "A")
+DEPT_B = os.getenv("TEST_DEPT_B", "B")
 
 # ── 測試 PDF（用於上傳測試）────────────────────────────────────
 # fixtures/test.pdf 是從 ingest-worker volume 複製出來的真實 PDF

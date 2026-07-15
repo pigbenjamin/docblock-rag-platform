@@ -9,7 +9,7 @@ PASS=0
 FAIL=0
 FAILED_LIST=()
 
-for i in 01 02 04 05 06 08 10 12; do
+for i in 01 02 04 05 06 08 10 12 13; do
   FILE=$(ls "${SCRIPT_DIR}/${i}_"*.py 2>/dev/null | head -1)
   if [[ -z "$FILE" ]]; then
     echo "⚠️  Test ${i}: 找不到檔案，跳過"

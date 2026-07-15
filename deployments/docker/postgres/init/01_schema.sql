@@ -370,3 +370,37 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_resource
 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_actor
   ON audit_logs(tenant_id, actor_id, created_at DESC);
+
+-- =========================================================
+-- 13_department_admins / global_admins（FB-6，D8/D9）
+-- =========================================================
+-- Keycloak 將與 HR 系統連動、群組樹不再手動維護，部門下不會有 KM 子群組，
+-- 所以「部門管理員」改由平台自建表管理（透過自己的 API/UI），對 Keycloak
+-- 零依賴。authz 的 owner-KM 捷徑語意不變（全 action、deny 蓋不掉），只是
+-- km_departments 的來源從 user_principal 的 role principal 換成查這張表；
+-- acl_entries 既有的 ('role','dept:X:role:KM') 共管慣例由 fetch_user_context
+-- 從本表「合成」出對應 role principal，既有資料不用改。
+CREATE TABLE IF NOT EXISTS department_admins (
+  tenant_id   TEXT NOT NULL,
+  department  TEXT NOT NULL,               -- 與 nodes.owner_department_id 同一套值
+  user_id     UUID NOT NULL,
+  created_by  UUID,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT pk_department_admins PRIMARY KEY (tenant_id, department, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_department_admins_user
+  ON department_admins(tenant_id, user_id);
+
+-- 全域管理員（D9）：對所有節點全 action 放行，負責指派各部門管理員與管理
+-- Public。不靠 Keycloak role；第一位管理員需手動 seed：
+--   INSERT INTO global_admins (tenant_id, user_id) VALUES ('<tenant>', '<user uuid>');
+CREATE TABLE IF NOT EXISTS global_admins (
+  tenant_id   TEXT NOT NULL,
+  user_id     UUID NOT NULL,
+  created_by  UUID,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT pk_global_admins PRIMARY KEY (tenant_id, user_id)
+);

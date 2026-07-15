@@ -2,8 +2,9 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
-# Node ACL entries only accept user/department subjects; 'role' stays a
-# user-attribute (KM checks read user_principal, never node ACLs).
+# Node ACL entries only accept user/department subjects; admin status is not
+# an ACL subject (owner-KM checks read the department_admins table, and authz
+# synthesizes 'dept:{d}:role:KM' role principals from it for legacy entries).
 NodeAclSubjectType = Literal["user", "department"]
 NodeAclEffect = Literal["allow", "deny"]
 

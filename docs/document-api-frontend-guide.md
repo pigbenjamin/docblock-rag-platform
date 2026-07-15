@@ -49,10 +49,11 @@ access token 過期後 API 回 401（`detail` 內含 "invalid token"）。前端
 
 ## 3. 權限模型：誰能做什麼
 
-權限**不看 token 裡的 role claim**，而是查後端資料庫。判斷分兩層：
+權限**不看 token 裡的 role claim**，而是查後端資料庫。判斷分三層：
 
-1. **KM 角色**（誰能管理）：查 `user_principal` 表（webhook-service 從 Keycloak group 成員關係同步過來）。Keycloak Groups 結構：每個部門（`A`/`B`/`C`）底下有 `Dev`/`KM`/`User` 三個子群組，**`/{部門}/KM` 的成員 = 該部門的 Knowledge Manager**。一個節點的 `owner_department_id` 部門的 KM，對該節點自動擁有所有權限（含底下整個子樹）——這是「防鎖死」設計：不會有一條 deny 規則能把部門 KM 擋在自己部門的資料夾外面。
-2. **節點 ACL**（誰能看/查/管理特定節點）：查 `acl_entries` 表，8 種 action 各自獨立、沿資料夾樹往下繼承，deny 優先於 allow，user 規則優先於 department 規則。詳見〈架構〉文件。
+1. **全域管理員**（FB-6）：`global_admins` 表裡的人對所有節點自動擁有所有權限（含 Public），並負責指派各部門管理員。名單用 `GET/PUT /v1/global-admins` 讀寫；第一位由後端直接 seed 進 DB。
+2. **部門管理員**（誰能管理，舊稱 KM）：查 `department_admins` 表——**不再從 Keycloak 群組結構推導**（Keycloak 與 HR 連動後部門下沒有 KM 子群組了），名單由全域管理員或該部門現任管理員透過 `GET/PUT /v1/departments/{department}/admins` 維護。一個節點的 `owner_department_id` 部門的管理員，對該節點自動擁有所有權限（含底下整個子樹）——這是「防鎖死」設計：不會有一條 deny 規則能把部門管理員擋在自己部門的資料夾外面。（部門「成員」資格仍來自 `user_principal`，由 webhook-service 從 Keycloak 頂層群組同步。）
+3. **節點 ACL**（誰能看/查/管理特定節點）：查 `acl_entries` 表，8 種 action 各自獨立、沿資料夾樹往下繼承，deny 優先於 allow，user 規則優先於 department 規則。詳見〈架構〉文件。
 
 前端無法也不需要自行判斷權限——直接呼叫，後端會回 403（或 404，見 §8）。清單類端點會依 `browse` 權限自動過濾，不會回傳沒有權限看的節點。
 
@@ -89,6 +90,10 @@ access token 過期後 API 回 401（`detail` 內含 "invalid token"）。前端
 | 查單一文件 metadata | `GET /v1/documents/{id}` | `browse` |
 | 查 ingest 進度 | `GET /v1/documents/job/{id}` | 對應文件的 `browse` |
 | 列出部門 | `GET /v1/departments` | 無需權限（純資訊端點） |
+| 查部門管理員名單 | `GET /v1/departments/{department}/admins` | 無需權限（通訊錄性質） |
+| 改部門管理員名單 | `PUT /v1/departments/{department}/admins` | 全域管理員，或該部門現任管理員（清空名單只有全域管理員可以） |
+| 查全域管理員名單 | `GET /v1/global-admins` | 無需權限 |
+| 改全域管理員名單 | `PUT /v1/global-admins` | 全域管理員（名單不得清空） |
 
 ---
 
@@ -253,9 +258,11 @@ access token 過期後 API 回 401（`detail` 內含 "invalid token"）。前端
 
 ---
 
-## 8. 部門下拉選單
+## 8. 部門下拉選單與管理員名單
 
-`GET /v1/departments` 只回傳「結構上像部門」的 Keycloak 頂層群組——底下有 `KM` 子群組才算數：
+`GET /v1/departments` 回傳 Keycloak 的**所有頂層群組**（`Public` 除外）——FB-6 起
+每個頂層群組都是部門，Keycloak 群組樹與 HR 連動、可能有多層，但子單位（處/課）在
+v1 一律忽略：
 
 ```json
 [
@@ -265,9 +272,15 @@ access token 過期後 API 回 401（`detail` 內含 "invalid token"）。前端
 ]
 ```
 
-- `Public` 已經被這條規則自動過濾掉（它沒有 KM 子群組），**不會**出現在這份清單裡——它是一個所有部門都能 browse/query/read 的共用根資料夾，會出現在 `GET /v1/nodes`（根層級）的目錄樹裡，但不是「部門」，不會出現在部門下拉選單
+- `Public` 被明確排除，**不會**出現在這份清單裡——它是一個所有部門都能 browse/query/read 的共用根資料夾，會出現在 `GET /v1/nodes`（根層級）的目錄樹裡，但不是「部門」，不會出現在部門下拉選單
 - ACL 相關 API 用的部門值是 `name`（不是 `id`）
-- 這是純資訊端點，回傳內容不代表使用者有權限上傳到這些部門（選了沒 KM 權限的部門，送出時會 403）
+- 這是純資訊端點，回傳內容不代表使用者有權限上傳到這些部門（選了自己無權的部門，送出時會 403）
+
+管理員名單（FB-6 新增，「權限管理」頁面用）：
+
+- `GET /v1/departments/{department}/admins` — 部門管理員名單，任何登入者可讀（想申請權限時知道要找誰）
+- `PUT /v1/departments/{department}/admins`（body `{ "user_ids": [...] }`，整批取代）— 全域管理員或該部門現任管理員可改；部門管理員可以交棒但不能清空名單（400）
+- `GET /v1/global-admins`、`PUT /v1/global-admins` — 全域管理員名單；只有全域管理員可改，且不得清空
 
 ---
 
@@ -299,3 +312,4 @@ access token 過期後 API 回 401（`detail` 內含 "invalid token"）。前端
 4. **`node_effective_permissions` 快取尚未實作**——`GET /v1/documents/` 這類扁平列表是「先分頁、再依權限過濾」，回應筆數可能少於 `limit`；`GET /v1/nodes`（樹狀瀏覽）不受影響，因為天然按資料夾分批
 5. **大檔案上傳/斷點續傳（upload session + presigned URL）尚未實作**——目前 100MB 以內走一般 multipart 上傳
 6. **`node_effective_permissions` 之外，資料夾搬移後的子樹重算是即時的**（沒有背景延遲），量大時可能需要之後優化
+7. ~~dev 環境部門命名兩套並存~~——已於 2026-07-15 解決：dev DB 全部改用 Keycloak 頂層群組原始名稱（`A`/`B`/`C`），與 `GET /v1/departments` 回傳值、webhook 同步寫入值一致。部門值在整個系統只有一套：Keycloak 群組名
