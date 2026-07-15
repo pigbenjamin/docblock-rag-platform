@@ -20,11 +20,20 @@ spec:
           image: pgvector/pgvector:pg16
           env:
             - name: POSTGRES_USER
-              value: "ai-x"
+              valueFrom:
+                secretKeyRef:
+                  name: docblock-db-secret
+                  key: POSTGRES_USER
             - name: POSTGRES_PASSWORD
-              value: "changeme"
+              valueFrom:
+                secretKeyRef:
+                  name: docblock-db-secret
+                  key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
-              value: "acl_FIRDI"
+              valueFrom:
+                secretKeyRef:
+                  name: docblock-db-secret
+                  key: POSTGRES_DB
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           ports:
@@ -70,4 +79,5 @@ spec:
   ports:
     - port: 5432
       targetPort: 5432
-  type: ClusterIP
+      nodePort: 31432
+  type: NodePort

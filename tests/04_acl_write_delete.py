@@ -4,13 +4,19 @@ PUT /v1/nodes/{document_id}/acl — 取代舊版 POST /v1/acl/write-map/delete-m
 
 新模型是「整批取代節點自己的 entries」，不是逐條增刪；node 預設
 inherit_acl=true，沒有自己的 entries 時完全繼承 parent 資料夾的權限。
-所以「刪除規則」在新模型下 = 重新 PUT 一份不含該規則的 entries 清單
-（或整批清空，回到純繼承）。
+所以「刪除規則」在新模型下 = 重新 PUT 一份不含該規則的 entries 清單。
+
+這份文件掛在 dept-A 資料夾下，資料夾本身只授權 dept-A（見
+scripts/migrate_fb1_nodes_acl.sql 的遷移結果），不會透過資料夾繼承讓
+dept-B 看到——所以跟 05/06 一樣，改成自己在開頭用 PUT 建立一個已知
+baseline（dept-B allow），驗證 deny 覆蓋 baseline、還原 baseline 後
+deny 消失，不依賴「清空後靠資料夾繼承恢復」這個對這份文件不成立的假設。
 
 驗證：
-  1. 對文件寫入 2 條明確 deny（覆蓋掉從部門資料夾繼承來的 allow）
+  0. 建立 baseline：dept-B allow（文件自己的 entry，不靠資料夾繼承）
+  1. 寫入 2 條明確 deny（覆蓋 baseline 的 allow）
   2. 搜尋確認：目標部門/使用者變成看不到，其他部門不受影響
-  3. 清空 entries（回到純繼承）
+  3. 還原成 baseline（回到 dept-B allow）
   4. 搜尋確認：deny 消失，恢復可查詢
 """
 import sys, os
@@ -24,7 +30,31 @@ DOC_ID   = "deptA_IT-OT_Network_Policy"
 DOC_UUID = EXISTING_DOCS[DOC_ID]
 OWNER_KM_USER = USERS["u001"]  # 假設是這份文件所在部門（A）的 KM
 
-# ── 1. 寫入 2 條明確 deny（覆蓋資料夾繼承的 allow）──────────────
+
+def used_ids(user_id):
+    r = requests.post(
+        f"{RETRIEVE_API}/v1/search",
+        json={"query": "IT OT 網路", "user_id": user_id, "document_ids": [DOC_UUID], "top_k": 5},
+        timeout=ACL_TIMEOUT,
+    )
+    if r.status_code != 200:
+        return None
+    return set(r.json().get("document_ids_used", []))
+
+
+# ── 0. 建立 baseline：dept-B allow ──────────────────────────────
+info(f"PUT /v1/nodes/{DOC_UUID}/acl  建立 baseline（{DEPT_B}=allow）")
+baseline_entries = [
+    {"subject_type": "department", "subject_id": DEPT_B, "actions": ["browse", "query", "read"], "effect": "allow"},
+]
+r = write_node_acl(DOC_UUID, OWNER_KM_USER, baseline_entries)
+if r.status_code != 200:
+    fail(f"建立 baseline 失敗 → HTTP {r.status_code}  body={r.text[:300]}")
+    summary()
+else:
+    ok(f"baseline 已建立 → permission_revision={r.json().get('permission_revision')}")
+
+# ── 1. 寫入 2 條明確 deny（覆蓋 baseline 的 allow）───────────────
 info(f"PUT /v1/nodes/{DOC_UUID}/acl  document_id={DOC_UUID}")
 entries = [
     {"subject_type": "department", "subject_id": DEPT_B, "actions": ["browse", "query", "read"], "effect": "deny"},
@@ -40,18 +70,6 @@ else:
 
 # ── 2. 搜尋驗證：dept-B、u004 應變成看不到，u001（同部門）不受影響 ──
 info("搜尋驗證 deny 生效")
-
-
-def used_ids(user_id):
-    r = requests.post(
-        f"{RETRIEVE_API}/v1/search",
-        json={"query": "IT OT 網路", "user_id": user_id, "document_ids": [DOC_UUID], "top_k": 5},
-        timeout=ACL_TIMEOUT,
-    )
-    if r.status_code != 200:
-        return None
-    return set(r.json().get("document_ids_used", []))
-
 
 cases = [
     (USERS["u001"], "u001(A部門, owner-KM)", True),
@@ -69,9 +87,9 @@ for user_id, label, expect_visible in cases:
     else:
         fail(f"{label}  可見={visible}，預期={expect_visible}")
 
-# ── 3. 清空 entries（回到純繼承）──────────────────────────────
-info(f"PUT /v1/nodes/{DOC_UUID}/acl（entries=[]，還原成純繼承部門資料夾權限）")
-r = write_node_acl(DOC_UUID, OWNER_KM_USER, [])
+# ── 3. 還原成 baseline（回到 dept-B allow）──────────────────────
+info(f"PUT /v1/nodes/{DOC_UUID}/acl（還原成 baseline：{DEPT_B}=allow）")
+r = write_node_acl(DOC_UUID, OWNER_KM_USER, baseline_entries)
 if r.status_code == 200:
     ok(f"還原成功 → permission_revision={r.json().get('permission_revision')}")
 else:
@@ -81,8 +99,8 @@ else:
 info("搜尋驗證還原效果（B 部門使用者應恢復可見）")
 used = used_ids(USERS["u003"])
 if used is not None and DOC_UUID in used:
-    ok(f"還原後 u003 可見（繼承恢復生效）")
+    ok(f"還原後 u003 可見（baseline 恢復生效）")
 else:
-    fail(f"還原後 u003 仍不可見（預期繼承恢復）：document_ids_used={used}")
+    fail(f"還原後 u003 仍不可見（預期 baseline 恢復）：document_ids_used={used}")
 
 summary()

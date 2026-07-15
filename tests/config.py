@@ -44,13 +44,15 @@ RAG_TIMEOUT    = 300                 # RAG 問答生成
 TENANT_ID = "firdi"
 
 # ── 現有測試文件（已在 DB 中）──────────────────────────────────
-# ⚠️ FB 系列改造（file-browser 目錄樹 + allow/deny ACL）後尚未對照真實 dev DB
-# 重新確認：這兩個 document_id 是否還在、遷移後 owner_department_id 是什麼，
-# 需要有 live DB 存取權的人先跑 02 確認。FB-1 遷移只會新增對應的 node，不會
-# 改變既有 document_id。
+# 2026-07-15 對 live k8s/dev DB 跑 02 確認：FB-1 遷移前的這兩個 document_id
+# 在 nodes 裡已經不存在了（GET/PUT 回 404，不是權限問題），不是遷移遺漏
+# ——遷移只會新增 node，不會刪除既有的，代表這兩筆本來就沒有被遷移到
+# （dev DB 在更早的階段就已經不含它們）。已用 u001 重新上傳兩份同名替代
+# fixture 到 dept-A 資料夾下，document_id 換成新的，其餘假設不變
+# （u001 = dept-A 的 owner-KM，對這兩份文件有 manage_acl）。
 EXISTING_DOCS = {
-    "test-eurfood": "aaaaaaaa-0001-0001-0001-000000000001",
-    "deptA_IT-OT_Network_Policy": "bd84084f-2ef1-4a6d-b77e-200978dfc5b2",
+    "test-eurfood": "506eb46e-9aaa-4a1f-9b53-830a5d48497a",
+    "deptA_IT-OT_Network_Policy": "8451b5b1-b62e-459a-9a92-5b2532654957",
 }
 
 # ── 測試用戶（已在 user_principal 中）────────────────────────
@@ -68,12 +70,17 @@ USERS = {
 }
 
 # ── 部門名稱 ────────────────────────────────────────────────
-# ⚠️ 舊版測試用 "dept-A" 這種寫法，但目前系統的部門值 = Keycloak 群組路徑
-# 第一段的原始字串（見 webhook-service user_sync_service.py _build_principals、
-# docs/document-api-frontend-guide.md §3.1），guide 裡的範例是單一字母
-# "A"/"B"/"C"。若實際 dev Keycloak 群組名稱不同，改這裡兩個常數即可。
-DEPT_A = os.getenv("TEST_DEPT_A", "A")
-DEPT_B = os.getenv("TEST_DEPT_B", "B")
+# 2026-07-15 對 live k8s/dev DB 驗證確認：這個 DB 的 nodes/user_principal
+# 用的是舊版 "dept-A" 這種帶前綴寫法（FB-1 遷移沿用了舊 document_acl 的
+# department 字串），不是 /v1/departments（走 Keycloak 群組原始名稱）回傳的
+# 單一字母 "A"/"B"/"C"——這兩套命名目前並存、尚未統一，D10/FB-6 要處理
+# 部門偵測時得留意這個落差。
+#
+# u002-u005 的 department principal 缺口已補齊（dev DB user_principal 直接
+# 補資料）：u001/u002=dept-A、u003/u004=dept-B、u005=dept-C。04/05/06 現在
+# 是真的在驗證 department-level allow/deny，不是靠 default-deny 巧合通過。
+DEPT_A = os.getenv("TEST_DEPT_A", "dept-A")
+DEPT_B = os.getenv("TEST_DEPT_B", "dept-B")
 
 # ── 測試 PDF（用於上傳測試）────────────────────────────────────
 # fixtures/test.pdf 是從 ingest-worker volume 複製出來的真實 PDF
