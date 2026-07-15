@@ -20,26 +20,68 @@ class UserSyncService:
                 json.dump(user, f, ensure_ascii=False, indent=4)
 
         if write_db:
-            if self.user_repository is None:
-                raise RuntimeError("UserRepository is not configured")
-
-            principals = self._build_principals(user)
-
-            self.user_repository.sync_user_principals(
-                user_id=user["id"],
-                principals=principals,
-            )
-
-            # 部門會隨 HR 連動動態出現：確保每個部門有根資料夾（含部門成員
-            # browse/query/read entries），且 Public 根對它 allow（D2）。
-            # 只增不減——部門消失時的清理是破壞性操作，留給管理員手動處理。
-            departments = sorted({
-                p["principal_id"] for p in principals
-                if p["principal_type"] == "department" and p["principal_id"] != "Public"
-            })
-            self.user_repository.ensure_department_infrastructure(departments)
+            self._write_db(user)
 
         return user
+
+    def _write_db(self, user: dict) -> None:
+        if self.user_repository is None:
+            raise RuntimeError("UserRepository is not configured")
+
+        principals = self._build_principals(user)
+
+        self.user_repository.sync_user_principals(
+            user_id=user["id"],
+            principals=principals,
+        )
+
+        # 部門會隨 HR 連動動態出現：確保每個部門有根資料夾（含部門成員
+        # browse/query/read entries），且 Public 根對它 allow（D2）。
+        # 只增不減——部門消失時的清理是破壞性操作，留給管理員手動處理。
+        departments = sorted({
+            p["principal_id"] for p in principals
+            if p["principal_type"] == "department" and p["principal_id"] != "Public"
+        })
+        self.user_repository.ensure_department_infrastructure(departments)
+
+    async def full_sync(self) -> dict:
+        """Reconcile every user in the realm against user_principal.
+
+        The event listener only fires on REGISTER/UPDATE_PROFILE/admin CRUD
+        on a user - anything provisioned another way (bulk AD import, a
+        realm restore, or simply an event lost while this service was down)
+        never reaches sync_user otherwise. This walks the full user list via
+        the admin API and re-syncs each one directly against our DB, without
+        going through the Keycloak event listener or the other webhook
+        fan-out target - it's a reconciliation pass, not a Keycloak event.
+
+        One failure doesn't abort the run; per-user errors are collected and
+        returned so the caller (a CronJob) can alert without losing the rest
+        of the batch.
+        """
+        if self.user_repository is None:
+            raise RuntimeError("UserRepository is not configured")
+
+        user_ids = await self.keycloak_client.list_all_user_ids()
+        token = await self.keycloak_client.get_token()
+
+        synced = 0
+        failures: list[dict] = []
+        for user_id in user_ids:
+            try:
+                user = await self.keycloak_client.fetch_user(user_id, token=token)
+                self._write_db(user)
+                synced += 1
+            except Exception as e:
+                failures.append({"user_id": user_id, "error": str(e)})
+
+        return {
+            "total": len(user_ids),
+            "synced": synced,
+            "failed_count": len(failures),
+            # capped so a bad run doesn't blow up the response body
+            "failures": failures[:20],
+        }
 
     def _build_principals(self, user: dict) -> list[dict]:
         principals = []

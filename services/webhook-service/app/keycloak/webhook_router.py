@@ -13,6 +13,11 @@ class WebhookRouter:
             self.sync_user,
             methods=["POST"],
         )
+        self.router.add_api_route(
+            "/full-sync",
+            self.full_sync,
+            methods=["POST"],
+        )
 
     async def sync_user(self, payload: dict, x_webhook_secret: str = Header(None)):
         if x_webhook_secret != self.webhook_secret:
@@ -35,3 +40,14 @@ class WebhookRouter:
             "status": "synced",
             "user_id": user_id,
         }
+
+    async def full_sync(self, x_webhook_secret: str = Header(None)):
+        if x_webhook_secret != self.webhook_secret:
+            raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+        try:
+            summary = await self.user_sync_service.full_sync()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        return {"status": "completed", **summary}

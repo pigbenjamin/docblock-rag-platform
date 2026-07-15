@@ -1,0 +1,44 @@
+---
+# Nightly reconciliation for the Keycloak event listener's blind spots
+# (bulk AD imports, events lost while webhook-service was down - see
+# docs/api-reference.md "POST /keycloak/full-sync"). Calls the in-cluster
+# webhook-service directly; doesn't touch the Keycloak listener or the
+# ai-platform fan-out target.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: keycloak-full-sync
+  namespace: docblock
+spec:
+  # 02:00 Asia/Taipei (UTC+8) = 18:00 UTC the previous day
+  schedule: "0 18 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1200
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: trigger-full-sync
+              image: curlimages/curl:8.10.1
+              env:
+                - name: WEBHOOK_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: docblock-app-secret
+                      key: WEBHOOK_SECRET
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  echo "Starting Keycloak full-sync reconciliation..."
+                  curl -sS --fail-with-body --max-time 900 \
+                    -X POST "http://webhook-service:8763/keycloak/full-sync" \
+                    -H "X-Webhook-Secret: ${WEBHOOK_SECRET}"
+                  echo
+                  echo "full-sync request completed."

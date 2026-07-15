@@ -22,8 +22,37 @@ class KeycloakClient:
             resp.raise_for_status()
             return resp.json()["access_token"]
 
-    async def fetch_user(self, user_id: str) -> dict:
+    async def list_all_user_ids(self, page_size: int = 100) -> list[str]:
+        """Page through the realm's users via the admin API, returning every
+        user id. Used by full-sync to reconcile users that were imported (or
+        edited) before the event listener existed / while it was down -
+        the event listener only fires on REGISTER/UPDATE_PROFILE/admin CRUD,
+        so anything provisioned outside those paths (e.g. an AD import that
+        doesn't touch each user individually) never reaches us otherwise."""
         token = await self.get_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        ids: list[str] = []
+        first = 0
+
+        async with httpx.AsyncClient(verify=self.verify, timeout=30) as client:
+            while True:
+                resp = await client.get(
+                    f"{self.keycloak_url}/admin/realms/{self.realm}/users",
+                    headers=headers,
+                    params={"briefRepresentation": "true", "first": first, "max": page_size},
+                )
+                resp.raise_for_status()
+                page = resp.json()
+                ids.extend(u["id"] for u in page if u.get("id"))
+                if len(page) < page_size:
+                    break
+                first += page_size
+
+        return ids
+
+    async def fetch_user(self, user_id: str, token: str | None = None) -> dict:
+        if token is None:
+            token = await self.get_token()
         headers = {"Authorization": f"Bearer {token}"}
 
         async with httpx.AsyncClient(verify=self.verify) as client:

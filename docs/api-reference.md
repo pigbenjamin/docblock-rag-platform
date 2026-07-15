@@ -526,6 +526,42 @@ browse/query/read entries、以及 Public 根資料夾對該部門的 allow entr
 
 ---
 
+### POST /keycloak/full-sync
+
+全量對帳：分頁走過 realm 的**所有**使用者，逐一比照 `/user-sync` 同一套邏輯寫回
+`user_principal`（含補齊部門根資料夾/成員 entries/Public allow）。同步用途——**不透過
+Keycloak event listener，也不會觸發 ai-platform 那邊的 fan-out**，純粹是直接查 Keycloak
+admin API 再寫我們自己的 DB。
+
+存在原因：event listener 只在 `REGISTER`/`UPDATE_PROFILE` 或對 `users/*` 的 admin
+CRUD 才會發事件——AD 批次匯入若不是逐一觸發這些事件（例如某些 partial import 方式），
+或 webhook-service 曾經停機漏接事件，那批使用者永遠不會自然同步進來。全量對帳補上這個
+缺口，且冪等（可重複執行，`sync_user_principals` 每次是 delete+reinsert，
+`ensure_department_infrastructure` 是 `ON CONFLICT DO NOTHING`）。
+
+**Headers**：`X-Webhook-Secret: <WEBHOOK_SECRET>`（與 `/user-sync` 共用同一組密鑰）
+
+**Response**（單一失敗不會中止整批，逐人收集錯誤）
+
+```json
+{
+  "status": "completed",
+  "total": 428,
+  "synced": 426,
+  "failed_count": 2,
+  "failures": [
+    { "user_id": "xxxxxxxx-...", "error": "..." }
+  ]
+}
+```
+
+`failures` 最多回傳 20 筆（避免壞掉的整批把回應塞爆）。由 k8s CronJob
+`deployments/k8s/10-full-sync-cronjob.yaml` 每天 02:00（Asia/Taipei）觸發一次；也可以
+手動打這支端點立即補跑。使用者數量大時可能耗時數分鐘（每人 2 次 Keycloak API + 2 次
+DB 寫入），CronJob 的 `activeDeadlineSeconds` 設 1200 秒。
+
+---
+
 ## 錯誤格式
 
 所有服務統一使用 FastAPI 預設格式：
